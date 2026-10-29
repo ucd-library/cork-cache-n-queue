@@ -1,0 +1,9 @@
+{
+  "registry": "us-west1-docker.pkg.dev/digital-ucdavis-edu/pub",
+  "repositories": {},
+  "images": {
+    "cork-cache-n-queue": {
+      "contextPath": "."
+    }
+  }
+}

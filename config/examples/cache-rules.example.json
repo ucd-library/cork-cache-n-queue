@@ -1,0 +1,10 @@
+[
+  [
+    { "target": "path", "matchType": "startsWith", "value": "/static/" },
+    { "target": "cookie", "name": "no-cache", "negate": true }
+  ],
+  [
+    { "target": "path", "matchType": "regex", "value": "\\.(css|js|png|jpg|jpeg|svg|woff2)$" },
+    { "target": "cookie", "name": "no-cache", "negate": true }
+  ]
+]

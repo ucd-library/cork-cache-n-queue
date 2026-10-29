@@ -1,0 +1,7 @@
+[
+  [
+    { "target": "path", "matchType": "regex", "value": "\\.(mp4|mov|zip|iso|bin|dmg|pdf)$" },
+    { "target": "header", "name": "authorization", "negate": true },
+    { "target": "cookie", "name": "session", "negate": true }
+  ]
+]

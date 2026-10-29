@@ -1,0 +1,7 @@
+spec:
+  - test/mocha/unit/**/*.test.js
+  - test/mocha/cache/**/*.test.js
+  - test/mocha/queue-store/**/*.test.js
+  - test/mocha/e2e/**/*.test.js
+timeout: 30000
+require: test/mocha/root-hooks.js

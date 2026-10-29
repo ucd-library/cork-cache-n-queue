@@ -24,10 +24,14 @@ const NON_BODY_METHODS = new Set(['GET', 'HEAD']);
  * @param {String} opts.upstreamUrl base URL of the upstream origin
  * @param {Object} [opts.cacheSink] optional write sink from DiskCache.openWriteSink(), see ../cache/index.js
  * @param {Object} opts.logger logger instance
+ * @param {String} [opts.cacheStatus] if set, written onto the response as the
+ * `X-Cache` header (e.g. 'MISS' or 'BYPASS') once the upstream response
+ * headers have been copied over, so it isn't clobbered by an identically
+ * named upstream header
  * @returns {Promise<void>}
  */
 async function proxyRequest(req, res, opts) {
-  let { upstreamUrl, cacheSink, logger } = opts;
+  let { upstreamUrl, cacheSink, logger, cacheStatus } = opts;
   let target = new URL(req.originalUrl, upstreamUrl);
   let method = req.method.toUpperCase();
   let hasBody = !NON_BODY_METHODS.has(method);
@@ -60,6 +64,7 @@ async function proxyRequest(req, res, opts) {
 
   res.status(fetchResponse.status);
   copyResponseHeaders(fetchResponse, res);
+  if (cacheStatus) res.setHeader('x-cache', cacheStatus);
 
   if (!fetchResponse.body) {
     cleanup();

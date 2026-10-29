@@ -54,6 +54,37 @@ describe('e2e: cache gate', function () {
     assert.strictEqual(requestCount, 1, 'second request should be served from cache without hitting the origin');
   });
 
+  it('tags a miss X-Cache: MISS and a subsequent hit X-Cache: HIT', async () => {
+    origin = await startServer((req, res) => {
+      res.writeHead(200, { 'cache-control': 'max-age=60' });
+      res.end('hello');
+    });
+
+    let cache = makeCache();
+    app = createApp({ cache, queue: null, upstreamUrl: origin.url, logger: fakeLogger });
+    appServer = await startServer(app);
+
+    let r1 = await fetch(`${appServer.url}/static/tagged.txt`);
+    assert.strictEqual(r1.headers.get('x-cache'), 'MISS');
+
+    let r2 = await fetch(`${appServer.url}/static/tagged.txt`);
+    assert.strictEqual(r2.headers.get('x-cache'), 'HIT');
+  });
+
+  it('tags a request outside the cache ruleset/methods X-Cache: BYPASS', async () => {
+    origin = await startServer((req, res) => {
+      res.writeHead(200, { 'cache-control': 'max-age=60' });
+      res.end('hello');
+    });
+
+    let cache = makeCache({ methods: ['GET'] });
+    app = createApp({ cache, queue: null, upstreamUrl: origin.url, logger: fakeLogger });
+    appServer = await startServer(app);
+
+    let res = await fetch(`${appServer.url}/static/a.txt`, { method: 'POST' });
+    assert.strictEqual(res.headers.get('x-cache'), 'BYPASS');
+  });
+
   it('a non-cacheable response (no-store) is never served from cache', async () => {
     let requestCount = 0;
     origin = await startServer((req, res) => {

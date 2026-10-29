@@ -6,7 +6,9 @@ import { proxyRequest } from '../lib/proxy/index.js';
  * @description build the single catch-all request handler implementing the
  * full gate order: cache check (a hit bypasses the queue and origin
  * entirely) -> queue admission gate -> proxy to the upstream origin -> cache
- * write (if eligible).
+ * write (if eligible). Every response carries an `X-Cache` header of `HIT`,
+ * `MISS`, or `BYPASS` (not in the cache's configured scope at all) so
+ * callers can tell which path served the response.
  *
  * @param {Object} opts
  * @param {Object} [opts.cache] DiskCache instance, or omitted if the cache is disabled
@@ -33,6 +35,7 @@ function createGatewayHandler(opts) {
           for (let [name, value] of Object.entries(hit.headers || {})) {
             res.setHeader(name, value);
           }
+          res.setHeader('x-cache', 'HIT');
           fs.createReadStream(hit.bodyPath).pipe(res);
           return;
         }
@@ -44,7 +47,7 @@ function createGatewayHandler(opts) {
       }
 
       let cacheSink = cacheEligible ? cache.beginWrite(cacheKey) : null;
-      await proxyRequest(req, res, { upstreamUrl, cacheSink, logger });
+      await proxyRequest(req, res, { upstreamUrl, cacheSink, logger, cacheStatus: cacheEligible ? 'MISS' : 'BYPASS' });
     } catch (e) {
       logger.error('gateway: unhandled error', e);
       if (!res.headersSent) res.status(502).send('Bad Gateway');

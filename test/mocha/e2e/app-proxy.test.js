@@ -74,6 +74,19 @@ describe('e2e: proxy behavior', function () {
     assert.deepStrictEqual([...cookies].sort(), ['a=1', 'b=2']);
   });
 
+  it('tags the response X-Cache: BYPASS when the cache is disabled entirely', async () => {
+    origin = await startServer((req, res) => {
+      res.writeHead(200, {});
+      res.end('ok');
+    });
+
+    app = createApp({ cache: null, queue: null, upstreamUrl: origin.url, logger: fakeLogger });
+    appServer = await startServer(app);
+
+    let res = await fetch(`${appServer.url}/anything`);
+    assert.strictEqual(res.headers.get('x-cache'), 'BYPASS');
+  });
+
   it('responds 502 when the upstream origin is unreachable', async () => {
     // start a server to claim an ephemeral port, then close it immediately -
     // nothing is listening there afterward, giving a reliable ECONNREFUSED

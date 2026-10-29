@@ -5,7 +5,7 @@ A lean pass-through reverse-proxy microservice for distributed-botnet mitigation
 1. **Queue** - a Postgres-coordinated concurrency admission gate, capping how many in-scope requests from a single CIDR-masked client-IP group may be in flight at once, queueing a few more, and rejecting the rest with `429`.
 2. **Cache** - a local, per-instance on-disk response cache. A cache hit is served immediately, bypassing the queue and the origin entirely.
 
-Each gate has its own independent, configurable rule set (regex/includes/startsWith/endsWith + negation, matched against the request's URI path, headers, and cookies) deciding which requests it applies to. Both gates are opt-in and off by default.
+Each gate has its own independent, configurable rule set (regex/includes/startsWith/endsWith + negation, matched against the request's URI path, headers, cookies, and query parameters) deciding which requests it applies to. Both gates are opt-in and off by default.
 
 ## Table of contents
 
@@ -124,15 +124,15 @@ Configuration is entirely environment-variable driven (`src/lib/config.js`), rea
 
 ## Rule engine
 
-Both `CCNQ_QUEUE_RULES_FILE` and `CCNQ_CACHE_RULES_FILE` point at a JSON file in the same shared format (`src/lib/rules/matcher.js`, `src/lib/rules/load-rules.js`), used to decide which requests a gate applies to - matched against the request's URI path, any header, or any cookie.
+Both `CCNQ_QUEUE_RULES_FILE` and `CCNQ_CACHE_RULES_FILE` point at a JSON file in the same shared format (`src/lib/rules/matcher.js`, `src/lib/rules/load-rules.js`), used to decide which requests a gate applies to - matched against the request's URI path, any header, any cookie, or any query parameter.
 
 ```
 Ruleset  := Array<Group>              // matches if ANY group matches (OR)
 Group    := Array<Condition>          // matches only if ALL conditions match (AND); a non-empty array is required
 Condition:= {
-  target:    "path" | "header" | "cookie",                         // required
-  name:      String,                                                // required for header/cookie, forbidden for path
-  matchType: "regex" | "includes" | "startsWith" | "endsWith",      // optional for header/cookie, REQUIRED for path
+  target:    "path" | "header" | "cookie" | "query",                // required
+  name:      String,                                                // required for header/cookie/query, forbidden for path
+  matchType: "regex" | "includes" | "startsWith" | "endsWith",      // optional for header/cookie/query, REQUIRED for path
   value:     String,                                                // required whenever matchType is set
   negate:    Boolean                                                // optional, default false
 }
@@ -141,8 +141,8 @@ Condition:= {
 Notes:
 
 - Groups are ANDed internally, groups are ORed against each other - this is standard disjunctive-normal-form, so a simple "match if ANY single condition matches" ruleset is just one condition per group.
-- Omitting `matchType` on a `header` or `cookie` condition makes it a **presence-only** check (true if that header/cookie exists at all, regardless of value). This isn't allowed on `path` conditions, since the path is always present and that would be a no-op.
-- `negate` inverts the whole condition, including for an absent header/cookie - so `{"target": "cookie", "name": "no-cache", "negate": true}` means "this request does NOT carry a `no-cache` cookie."
+- Omitting `matchType` on a `header`, `cookie`, or `query` condition makes it a **presence-only** check (true if that header/cookie/query param exists at all, regardless of value). This isn't allowed on `path` conditions, since the path is always present and that would be a no-op.
+- `negate` inverts the whole condition, including for an absent header/cookie/query param - so `{"target": "cookie", "name": "no-cache", "negate": true}` means "this request does NOT carry a `no-cache` cookie."
 - Method filtering (`CCNQ_QUEUE_METHODS` / `CCNQ_CACHE_METHODS`) is **not** expressed as a rule condition - it's a separate, cheaper pre-filter applied before the ruleset.
 - Regexes are compiled once at startup, not per-request.
 - An empty ruleset, or a ruleset containing only empty groups, never matches anything (a gate's rules file effectively disabling it) - this is a deliberate safe default for a security-relevant matcher, not a "match everything" fallback.
@@ -181,6 +181,20 @@ This is one group of three ANDed conditions: the path looks like a large binary 
 ```
 
 Two groups (ORed): "under `/static/`" or "looks like a static asset by extension", each still requiring the absence of a `no-cache` cookie.
+
+### Example: query parameter condition
+
+A `query` condition targets a single query string parameter by name, same as `header`/`cookie`:
+
+```json
+[
+  [
+    { "target": "query", "name": "preview", "matchType": "includes", "value": "1" }
+  ]
+]
+```
+
+Matches any request with a `preview` query parameter whose value contains `1` (e.g. `?preview=1`).
 
 ## Queue internals
 

@@ -4,7 +4,7 @@
  * given set of request facts.
  *
  * @param {Object} condition a single rule condition, see matchCondition
- * @param {Object} facts {path, headers, cookies} as produced by extractRequestFacts
+ * @param {Object} facts {path, headers, cookies, query} as produced by extractRequestFacts
  * @returns {String|undefined} the resolved value, or undefined if the target
  * (a header or cookie) is not present on the request at all
  */
@@ -19,6 +19,10 @@ function resolveTarget(condition, facts) {
 
   if (condition.target === 'cookie') {
     return facts.cookies[condition.name];
+  }
+
+  if (condition.target === 'query') {
+    return facts.query[condition.name];
   }
 
   return undefined;
@@ -45,14 +49,14 @@ function applyMatchType(matchType, actual, value, compiledRegex) {
 /**
  * @function matchCondition
  * @description evaluate a single rule condition against a request's facts.
- * A condition with no matchType is a presence-only check (the target header
- * or cookie exists at all, regardless of value). An absent header/cookie
- * target always resolves to a base result of false, before negate is applied
- * - this is what lets {target:'cookie', name:'x', negate:true} express
- * "cookie x is NOT present".
+ * A condition with no matchType is a presence-only check (the target header,
+ * cookie, or query param exists at all, regardless of value). An absent
+ * header/cookie/query target always resolves to a base result of false,
+ * before negate is applied - this is what lets
+ * {target:'cookie', name:'x', negate:true} express "cookie x is NOT present".
  *
  * @param {Object} condition {target, name, matchType, value, negate, _compiledRegex}
- * @param {Object} facts {path, headers, cookies}
+ * @param {Object} facts {path, headers, cookies, query}
  * @returns {Boolean}
  */
 function matchCondition(condition, facts) {
@@ -77,7 +81,7 @@ function matchCondition(condition, facts) {
  * accidentally mean "match everything".
  *
  * @param {Array<Object>} group array of conditions
- * @param {Object} facts {path, headers, cookies}
+ * @param {Object} facts {path, headers, cookies, query}
  * @returns {Boolean}
  */
 function matchGroup(group, facts) {
@@ -91,7 +95,7 @@ function matchGroup(group, facts) {
  * matches (OR of ANDs - disjunctive normal form).
  *
  * @param {Array<Array<Object>>} ruleset array of condition groups
- * @param {Object} facts {path, headers, cookies}
+ * @param {Object} facts {path, headers, cookies, query}
  * @returns {Boolean}
  */
 function matchRuleset(ruleset, facts) {

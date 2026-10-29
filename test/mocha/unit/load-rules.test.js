@@ -43,7 +43,7 @@ describe('load-rules', () => {
   });
 
   it('rejects an invalid target', () => {
-    assert.throws(() => validateRuleset([[{ target: 'query' }]]), /\[0\]\[0\].*invalid target/);
+    assert.throws(() => validateRuleset([[{ target: 'bogus' }]]), /\[0\]\[0\].*invalid target/);
   });
 
   it('rejects a header condition missing name', () => {
@@ -52,6 +52,10 @@ describe('load-rules', () => {
 
   it('rejects a cookie condition missing name', () => {
     assert.throws(() => validateRuleset([[{ target: 'cookie' }]]), /no non-empty "name"/);
+  });
+
+  it('rejects a query condition missing name', () => {
+    assert.throws(() => validateRuleset([[{ target: 'query' }]]), /no non-empty "name"/);
   });
 
   it('rejects a path condition that sets name', () => {
@@ -80,5 +84,9 @@ describe('load-rules', () => {
 
   it('allows a presence-only header/cookie condition (no matchType)', () => {
     assert.doesNotThrow(() => validateRuleset([[{ target: 'header', name: 'authorization' }]]));
+  });
+
+  it('allows a presence-only query condition (no matchType)', () => {
+    assert.doesNotThrow(() => validateRuleset([[{ target: 'query', name: 'debug' }]]));
   });
 });

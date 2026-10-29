@@ -6,6 +6,7 @@ function facts(overrides = {}) {
     path: '/foo/bar.pdf',
     headers: { 'x-custom': 'hello-world', authorization: 'Bearer abc' },
     cookies: { session: 'xyz' },
+    query: { foo: 'bar123' },
     ...overrides
   };
 }
@@ -33,11 +34,21 @@ describe('rule matcher', () => {
       assert.strictEqual(matchCondition(cond, facts()), true);
     });
 
-    it('treats a missing matchType on header/cookie as presence-only', () => {
+    it('matches query param via includes', () => {
+      let cond = { target: 'query', name: 'foo', matchType: 'includes', value: 'bar' };
+      assert.strictEqual(matchCondition(cond, facts()), true);
+    });
+
+    it('treats a missing matchType on header/cookie/query as presence-only', () => {
       let present = matchCondition({ target: 'cookie', name: 'session' }, facts());
       let absent = matchCondition({ target: 'cookie', name: 'nope' }, facts());
       assert.strictEqual(present, true);
       assert.strictEqual(absent, false);
+
+      let queryPresent = matchCondition({ target: 'query', name: 'foo' }, facts());
+      let queryAbsent = matchCondition({ target: 'query', name: 'nope' }, facts());
+      assert.strictEqual(queryPresent, true);
+      assert.strictEqual(queryAbsent, false);
     });
 
     it('negate flips a positive match to false', () => {
@@ -47,6 +58,11 @@ describe('rule matcher', () => {
 
     it('negate flips an absent header/cookie to true (expresses "not present")', () => {
       let cond = { target: 'cookie', name: 'no-cache', negate: true };
+      assert.strictEqual(matchCondition(cond, facts()), true);
+    });
+
+    it('negate flips an absent query param to true (expresses "not present")', () => {
+      let cond = { target: 'query', name: 'debug', negate: true };
       assert.strictEqual(matchCondition(cond, facts()), true);
     });
 

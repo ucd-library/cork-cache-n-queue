@@ -21,4 +21,28 @@ describe('extractRequestFacts', () => {
     let facts = extractRequestFacts(req);
     assert.deepStrictEqual(facts.cookies, {});
   });
+
+  it('parses query params from originalUrl', () => {
+    let req = { path: '/foo', headers: {}, originalUrl: '/foo?a=1&b=2' };
+    let facts = extractRequestFacts(req);
+    assert.deepStrictEqual(facts.query, { a: '1', b: '2' });
+  });
+
+  it('returns an empty query object when there is no query string', () => {
+    let req = { path: '/foo', headers: {}, originalUrl: '/foo' };
+    let facts = extractRequestFacts(req);
+    assert.deepStrictEqual(facts.query, {});
+  });
+
+  it('returns an empty query object when originalUrl is missing', () => {
+    let req = { path: '/foo', headers: {} };
+    let facts = extractRequestFacts(req);
+    assert.deepStrictEqual(facts.query, {});
+  });
+
+  it('keeps the last occurrence of a duplicate query param name', () => {
+    let req = { path: '/foo', headers: {}, originalUrl: '/foo?a=1&a=2' };
+    let facts = extractRequestFacts(req);
+    assert.deepStrictEqual(facts.query, { a: '2' });
+  });
 });

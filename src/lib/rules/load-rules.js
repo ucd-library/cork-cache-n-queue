@@ -1,6 +1,6 @@
 import fs from 'fs';
 
-const VALID_TARGETS = ['path', 'header', 'cookie'];
+const VALID_TARGETS = ['path', 'header', 'cookie', 'query'];
 const VALID_MATCH_TYPES = ['regex', 'includes', 'startsWith', 'endsWith'];
 
 /**

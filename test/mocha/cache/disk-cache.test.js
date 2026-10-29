@@ -111,6 +111,24 @@ describe('DiskCache', () => {
     assert.strictEqual(await cache.getOrWait(key), null);
   });
 
+  it('caches a Set-Cookie response and strips the header when stripSetCookie is enabled', async () => {
+    let cache = makeCache({ stripSetCookie: true });
+    let key = 'strip-set-cookie';
+    await populate(cache, key, { headers: { 'set-cookie': 'a=1', 'content-type': 'text/plain' } });
+
+    let hit = await cache.getOrWait(key);
+    assert.ok(hit, 'expected a cache hit');
+    assert.strictEqual(hit.headers['set-cookie'], undefined, 'set-cookie should have been stripped');
+    assert.strictEqual(hit.headers['content-type'], 'text/plain', 'other headers should be untouched');
+  });
+
+  it('still honors Cache-Control when stripSetCookie is enabled', async () => {
+    let cache = makeCache({ stripSetCookie: true });
+    let key = 'strip-set-cookie-no-store';
+    await populate(cache, key, { headers: { 'set-cookie': 'a=1', 'cache-control': 'no-store' } });
+    assert.strictEqual(await cache.getOrWait(key), null, 'no-store should still block caching after stripping');
+  });
+
   it('uses the fallback ttl when respectCacheControl is false', async () => {
     let cache = makeCache({ respectCacheControl: false, ttlMs: 60000 });
     let key = 'ignore-cc';

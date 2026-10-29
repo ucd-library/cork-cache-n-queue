@@ -38,6 +38,7 @@ describe('config', () => {
     assert.deepStrictEqual(config.cache.methods, ['GET', 'HEAD']);
     assert.strictEqual(config.cache.keyIncludeQuery, true);
     assert.strictEqual(config.cache.respectCacheControl, true);
+    assert.strictEqual(config.cache.stripSetCookie, false);
     assert.strictEqual(config.cache.maxSizeBytes, 1024 * 1024 * 1024);
   });
 
@@ -49,6 +50,7 @@ describe('config', () => {
       CCNQ_QUEUE_METHODS: 'get, post',
       CCNQ_CACHE_KEY_INCLUDE_QUERY: 'false',
       CCNQ_CACHE_RESPECT_CACHE_CONTROL: 'false',
+      CCNQ_CACHE_STRIP_SET_COOKIE: 'true',
       CCNQ_CACHE_VARY_HEADERS: 'Accept-Encoding, X-Foo'
     });
     assert.strictEqual(config.port, 8080);
@@ -57,6 +59,7 @@ describe('config', () => {
     assert.deepStrictEqual(config.queue.methods, ['GET', 'POST']);
     assert.strictEqual(config.cache.keyIncludeQuery, false);
     assert.strictEqual(config.cache.respectCacheControl, false);
+    assert.strictEqual(config.cache.stripSetCookie, true);
     assert.deepStrictEqual(config.cache.varyHeaders, ['accept-encoding', 'x-foo']);
   });
 

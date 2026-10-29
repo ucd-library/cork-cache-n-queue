@@ -29,4 +29,27 @@ function startServer(requestListener) {
   });
 }
 
-export { startServer };
+/**
+ * @function rawGet
+ * @description issue a GET with node:http directly, bypassing fetch()'s
+ * automatic Content-Encoding negotiation/decompression entirely - this is
+ * the only way to observe the exact bytes and headers a client that doesn't
+ * auto-decode (e.g. curl without --compressed) would see.
+ *
+ * @param {String} url full request URL
+ * @param {Object} [opts] {headers}
+ * @returns {Promise<Object>} {status, headers, body (Buffer)}
+ */
+function rawGet(url, opts = {}) {
+  return new Promise((resolve, reject) => {
+    let req = http.get(url, { headers: opts.headers || {} }, res => {
+      let chunks = [];
+      res.on('data', chunk => chunks.push(chunk));
+      res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks) }));
+      res.on('error', reject);
+    });
+    req.on('error', reject);
+  });
+}
+
+export { startServer, rawGet };

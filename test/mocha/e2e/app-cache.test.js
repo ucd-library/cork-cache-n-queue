@@ -145,6 +145,30 @@ describe('e2e: cache gate', function () {
     assert.strictEqual(requestCount, 2, 'a 204 has no body to cache, so the origin must be hit again');
   });
 
+  it('never caches a Set-Cookie response by default, but strips and caches it when stripSetCookie is enabled', async () => {
+    let requestCount = 0;
+    origin = await startServer((req, res) => {
+      requestCount++;
+      res.writeHead(200, { 'cache-control': 'max-age=60', 'set-cookie': 'session=abc123' });
+      res.end('cookie-' + requestCount);
+    });
+
+    let cache = makeCache({ stripSetCookie: true });
+    app = createApp({ cache, queue: null, upstreamUrl: origin.url, logger: fakeLogger });
+    appServer = await startServer(app);
+
+    let r1 = await fetch(`${appServer.url}/static/a.txt`);
+    assert.strictEqual(await r1.text(), 'cookie-1');
+    assert.strictEqual(r1.headers.get('x-cache'), 'MISS');
+    assert.strictEqual(r1.headers.get('set-cookie'), 'session=abc123', 'the live client should still receive the real Set-Cookie');
+
+    let r2 = await fetch(`${appServer.url}/static/a.txt`);
+    assert.strictEqual(await r2.text(), 'cookie-1', 'second request should be served from cache without hitting the origin');
+    assert.strictEqual(r2.headers.get('x-cache'), 'HIT');
+    assert.strictEqual(r2.headers.get('set-cookie'), null, 'the cached response should not replay Set-Cookie to other clients');
+    assert.strictEqual(requestCount, 1);
+  });
+
   it('two concurrent requests for the same not-yet-cached url only hit the origin once (thundering-herd dedup)', async () => {
     let requestCount = 0;
     let release;

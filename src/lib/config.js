@@ -72,6 +72,7 @@ const config = {
     maxItemSizeBytes: parseIntOr(env.CCNQ_CACHE_MAX_ITEM_SIZE_BYTES, 10 * 1024 * 1024),
     ttlMs: parseIntOr(env.CCNQ_CACHE_TTL_MS, 60000),
     respectCacheControl: env.CCNQ_CACHE_RESPECT_CACHE_CONTROL !== 'false',
+    stripSetCookie: env.CCNQ_CACHE_STRIP_SET_COOKIE === 'true',
     methods: parseCsv(env.CCNQ_CACHE_METHODS || 'GET,HEAD').map(m => m.toUpperCase()),
     varyHeaders: parseCsv(env.CCNQ_CACHE_VARY_HEADERS).map(h => h.toLowerCase()),
     keyIncludeQuery: env.CCNQ_CACHE_KEY_INCLUDE_QUERY !== 'false',

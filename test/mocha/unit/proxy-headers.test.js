@@ -69,6 +69,17 @@ describe('proxy/headers', () => {
       copyResponseHeaders(fetchResponse, res);
       assert.strictEqual('set-cookie' in res.headers, false);
     });
+
+    it('strips content-encoding and content-length, since fetch() already decoded the body', () => {
+      let fetchResponse = {
+        headers: new Headers([['content-encoding', 'gzip'], ['content-length', '1234'], ['x-keep-me', 'yes']])
+      };
+      let res = fakeRes();
+      copyResponseHeaders(fetchResponse, res);
+      assert.strictEqual('content-encoding' in res.headers, false);
+      assert.strictEqual('content-length' in res.headers, false);
+      assert.strictEqual(res.headers['x-keep-me'], 'yes');
+    });
   });
 
   describe('buildHeadersObject', () => {
@@ -77,6 +88,16 @@ describe('proxy/headers', () => {
       let obj = buildHeadersObject(fetchResponse);
       assert.strictEqual(obj['cache-control'], 'max-age=60');
       assert.strictEqual(obj['x-foo'], 'bar');
+    });
+
+    it('strips content-encoding and content-length so a cached entry stays consistent with its decoded body', () => {
+      let fetchResponse = {
+        headers: new Headers([['content-encoding', 'gzip'], ['content-length', '1234'], ['cache-control', 'max-age=60']])
+      };
+      let obj = buildHeadersObject(fetchResponse);
+      assert.strictEqual('content-encoding' in obj, false);
+      assert.strictEqual('content-length' in obj, false);
+      assert.strictEqual(obj['cache-control'], 'max-age=60');
     });
   });
 });

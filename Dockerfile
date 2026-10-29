@@ -1,4 +1,4 @@
-FROM node:22
+FROM node:24
 
 WORKDIR /opt/cork-cache-n-queue
 

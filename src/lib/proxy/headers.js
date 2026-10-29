@@ -9,6 +9,12 @@ const HOP_BY_HOP_HEADERS = new Set([
   'upgrade'
 ]);
 
+// fetch() transparently decompresses a gzip/br/deflate upstream body, but
+// leaves the Response's headers reporting the original, now-stale wire
+// encoding and length - these must never be forwarded or cached alongside
+// the body fetch() already decoded for us.
+const STALE_ENCODING_HEADERS = new Set(['content-encoding', 'content-length']);
+
 /**
  * @function buildForwardHeaders
  * @description build the headers object to send upstream from an incoming
@@ -34,7 +40,9 @@ function buildForwardHeaders(incomingHeaders) {
 /**
  * @function copyResponseHeaders
  * @description copy a fetch Response's headers onto an express response,
- * stripping hop-by-hop headers and preserving multiple Set-Cookie headers as
+ * stripping hop-by-hop headers, the now-stale Content-Encoding/Content-Length
+ * left over from fetch()'s automatic decompression (see
+ * STALE_ENCODING_HEADERS), and preserving multiple Set-Cookie headers as
  * separate header lines rather than comma-merging them.
  *
  * @param {Response} fetchResponse native fetch Response
@@ -45,6 +53,7 @@ function copyResponseHeaders(fetchResponse, res) {
   for (let [name, value] of fetchResponse.headers.entries()) {
     let lower = name.toLowerCase();
     if (HOP_BY_HOP_HEADERS.has(lower)) continue;
+    if (STALE_ENCODING_HEADERS.has(lower)) continue;
     if (lower === 'set-cookie') continue; // handled separately below, may be multi-valued
     res.setHeader(name, value);
   }
@@ -59,7 +68,9 @@ function copyResponseHeaders(fetchResponse, res) {
  * @function buildHeadersObject
  * @description build a plain, lowercase-keyed headers object from a fetch
  * Response, for use by the cache (Cache-Control inspection, Set-Cookie
- * presence check).
+ * presence check). Strips the same stale Content-Encoding/Content-Length as
+ * copyResponseHeaders(), so a cached entry's headers stay consistent with the
+ * already-decoded body bytes actually written to disk.
  *
  * @param {Response} fetchResponse native fetch Response
  * @returns {Object<String,String>}
@@ -67,7 +78,9 @@ function copyResponseHeaders(fetchResponse, res) {
 function buildHeadersObject(fetchResponse) {
   let headers = {};
   for (let [name, value] of fetchResponse.headers.entries()) {
-    headers[name.toLowerCase()] = value;
+    let lower = name.toLowerCase();
+    if (STALE_ENCODING_HEADERS.has(lower)) continue;
+    headers[lower] = value;
   }
   return headers;
 }

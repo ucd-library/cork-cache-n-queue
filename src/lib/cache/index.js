@@ -41,8 +41,8 @@ class DiskCache {
   /**
    * @param {Object} opts
    * @param {Object} opts.config cache settings: dir, maxSizeBytes,
-   * maxItemSizeBytes, ttlMs, respectCacheControl, methods, varyHeaders,
-   * keyIncludeQuery, sweepIntervalMs
+   * maxItemSizeBytes, ttlMs, respectCacheControl, stripSetCookie, methods,
+   * varyHeaders, keyIncludeQuery, sweepIntervalMs
    * @param {Array<Array<Object>>} opts.rules compiled cache ruleset, see ../rules/load-rules.js
    * @param {Object} opts.logger logger instance
    */
@@ -201,14 +201,22 @@ class DiskCache {
   /**
    * @method isCacheable
    * @description decide whether an upstream response may be cached, and
-   * compute its TTL. A response carrying Set-Cookie is never cached,
-   * regardless of configuration.
+   * compute its TTL. A response carrying Set-Cookie is never cached unless
+   * `stripSetCookie` is enabled, in which case the header is deleted from
+   * `headers` in place (mutating the caller's object) and the response is
+   * otherwise evaluated for cacheability as normal - the caller
+   * (openWriteSink().finish()) relies on this mutation, since the same
+   * headers object is what gets persisted to disk.
    *
-   * @param {Object<String,String>} headers response headers, lowercase keys
+   * @param {Object<String,String>} headers response headers, lowercase keys;
+   * mutated in place when stripSetCookie strips Set-Cookie
    * @returns {Object} {cacheable: Boolean, ttlMs: Number}
    */
   isCacheable(headers) {
-    if (headers['set-cookie']) return { cacheable: false, ttlMs: 0 };
+    if (headers['set-cookie']) {
+      if (!this.config.stripSetCookie) return { cacheable: false, ttlMs: 0 };
+      delete headers['set-cookie'];
+    }
 
     if (!this.config.respectCacheControl) {
       return { cacheable: true, ttlMs: this.config.ttlMs };

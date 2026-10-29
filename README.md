@@ -103,7 +103,10 @@ Configuration is entirely environment-variable driven (`src/lib/config.js`), rea
 | `CCNQ_QUEUE_POLL_INTERVAL_MS` | `250` | How often a queued request polls Postgres to check whether it's been promoted to active. |
 | `CCNQ_QUEUE_IPV4_PREFIX_LENGTH` | `24` | IPv4 CIDR prefix length used to group client IPs. Must be a multiple of 8 (byte-aligned masking). |
 | `CCNQ_QUEUE_IPV6_PREFIX_LENGTH` | `64` | IPv6 CIDR prefix length used to group client IPs. Must be a multiple of 16 (hextet-aligned masking). |
-| `CCNQ_QUEUE_STALE_ACTIVE_MS` | `300000` | Age after which an "active" row is assumed abandoned (e.g. the instance that held it crashed) and is cleared out by the crash-recovery sweep. |
+| `CCNQ_QUEUE_STALE_ACTIVE_MS` | `300000` | Age after which an "active" row is assumed abandoned (e.g. the instance that held it crashed) and is cleared out by the background sweep. |
+| `CCNQ_QUEUE_SWEEP_INTERVAL_MS` | `60000` | Interval for the background sweep that runs crash-recovery reconciliation (`CCNQ_QUEUE_STALE_ACTIVE_MS`) and prunes fully-idle `group_state` rows (`CCNQ_QUEUE_IDLE_GROUP_MS`). |
+| `CCNQ_QUEUE_IDLE_GROUP_MS` | `3600000` | How long a `group_state` row may sit with zero active and zero pending requests before the background sweep deletes it, so the table doesn't grow forever as new ip groups are seen. |
+| `CCNQ_QUEUE_MAX_ACTIVE_DURATION_MS` | `0` (disabled) | Max time an admitted request may stay active before the queue forcibly destroys its connection, aborting the upstream fetch and freeing its slot. Opt-in only, since a nonzero value will cut off legitimately slow/long-lived responses - set it comfortably above your slowest expected upstream latency. |
 | `CCNQ_QUEUE_ALLOWLIST` | *(empty)* | Comma-separated list of bare IPs, CIDR ranges, and/or `start-end` ranges (IPv4 or IPv6) that bypass the queue gate entirely, e.g. `203.0.113.5,198.51.100.0/24,192.0.2.10-192.0.2.20`. |
 
 ### Cache
@@ -201,10 +204,10 @@ Matches any request with a `preview` query parameter whose value contains `1` (e
 
 The queue's state lives in Postgres under a dedicated schema (default `queue`, see `sql/001-queue.sql`):
 
-- `group_state(ip_group PK, active_count, pending_count)` - one row per ip group, doubling as that group's mutex (every function below locks it with `FOR UPDATE` before mutating anything).
+- `group_state(ip_group PK, active_count, pending_count, last_active)` - one row per ip group, doubling as that group's mutex (every function below locks it with `FOR UPDATE` before mutating anything). `last_active` is bumped on every count-changing transition and is what the background sweep uses to prune fully-idle rows (see below) - without it the table would grow by one permanent row per distinct ip group ever seen.
 - `active_request(request_id PK, ip_group, created)` - one row per in-flight (admitted) request.
 - `pending_request(request_id PK, ip_group, created)` - one row per queued (waiting) request.
-- Five plpgsql functions, each a single atomic round trip: `try_admit`, `enqueue_if_room`, `release_and_promote`, `expire_pending`, `reconcile_stale`.
+- Six plpgsql functions, each a single atomic round trip: `try_admit`, `enqueue_if_room`, `release_and_promote`, `expire_pending`, `reconcile_stale`, `prune_idle_groups`.
 
 `Queue.admit()` (`src/lib/queue/index.js`) is the per-request state machine:
 
@@ -215,7 +218,11 @@ The queue's state lives in Postgres under a dedicated schema (default `queue`, s
 
 **Fail-open by design:** every Postgres call in this path is wrapped so that a database error logs and lets the request through, rather than blocking traffic - *except* the deliberate timeout/expiry path, which fails closed with `429`. In other words, if Postgres is unavailable, the queue effectively turns itself off rather than taking the origin down with it; the operational tradeoff is that a Postgres outage removes bot-mitigation coverage, not origin availability.
 
-`reconcile_stale` is the crash-recovery safety net: if an instance dies mid-request without releasing its active slot, that row would otherwise block real traffic forever. It's called opportunistically (not on a timer) from the one path where a phantom stale slot would actually matter - when a group's queue is already full and about to reject a request. It deletes active rows older than `CCNQ_QUEUE_STALE_ACTIVE_MS` and recomputes `active_count` from what's actually left.
+`reconcile_stale` is the crash-recovery safety net: if an instance dies mid-request without releasing its active slot, that row would otherwise block real traffic forever. It deletes active rows older than `CCNQ_QUEUE_STALE_ACTIVE_MS` and recomputes `active_count` from what's actually left. It's still called opportunistically from `admit()` - when a group's queue is already full and about to reject a request - but it's also now run on a schedule (see below), so it no longer depends on that one contention path to ever fire.
+
+`Queue.startSweeping()`/`stopSweeping()` (started in `src/server.js` alongside the cache's own sweep, stopped on graceful shutdown) run a background timer every `CCNQ_QUEUE_SWEEP_INTERVAL_MS` that calls `reconcile_stale` followed by `prune_idle_groups`. `prune_idle_groups` deletes any `group_state` row that's had zero active and zero pending requests for at least `CCNQ_QUEUE_IDLE_GROUP_MS` - this is what actually bounds the table's row count, since otherwise a row is never removed once an ip group is first seen.
+
+**Force-disconnecting over-long requests**: setting `CCNQ_QUEUE_MAX_ACTIVE_DURATION_MS` (default `0`, disabled) attaches a timer to every admitted request; if it's still active once that duration elapses, the queue calls `res.destroy()` on it directly - not just cleaning up Postgres bookkeeping, but actually tearing down the client connection and (via the proxy's own close handler) aborting the in-flight upstream fetch, freeing the slot for the next queued request. This is a hard disconnect by design: no error body is sent, since headers may already be streaming. Leave it at `0` unless you specifically need a backstop against requests that hang open indefinitely - `reconcile_stale`'s 5-minute default already handles the case of an abandoned row from a *crashed* instance; this setting is for a request that's still alive but has simply run too long.
 
 ## Cache internals
 

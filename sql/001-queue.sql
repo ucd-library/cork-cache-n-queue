@@ -7,8 +7,10 @@ set search_path={{SCHEMA}},public;
 CREATE TABLE IF NOT EXISTS group_state (
   ip_group      TEXT PRIMARY KEY,
   active_count  INT NOT NULL DEFAULT 0,
-  pending_count INT NOT NULL DEFAULT 0
+  pending_count INT NOT NULL DEFAULT 0,
+  last_active   TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+ALTER TABLE group_state ADD COLUMN IF NOT EXISTS last_active TIMESTAMPTZ NOT NULL DEFAULT NOW();
 
 -- one row per in-flight (admitted) request
 CREATE TABLE IF NOT EXISTS active_request (
@@ -32,11 +34,17 @@ CREATE OR REPLACE FUNCTION try_admit(
 ) RETURNS BOOLEAN AS $$
 DECLARE admitted BOOLEAN := FALSE;
 BEGIN
-  INSERT INTO group_state (ip_group) VALUES (ip_group_in) ON CONFLICT DO NOTHING;
-  PERFORM 1 FROM group_state WHERE ip_group = ip_group_in FOR UPDATE;
+  -- retry loop: a concurrent prune_idle_groups can delete the row between the
+  -- INSERT and the FOR UPDATE lock below, so keep re-inserting until the lock
+  -- actually lands on a row that exists
+  LOOP
+    INSERT INTO group_state (ip_group) VALUES (ip_group_in) ON CONFLICT DO NOTHING;
+    PERFORM 1 FROM group_state WHERE ip_group = ip_group_in FOR UPDATE;
+    EXIT WHEN FOUND;
+  END LOOP;
 
   IF (SELECT active_count FROM group_state WHERE ip_group = ip_group_in) < max_served_in THEN
-    UPDATE group_state SET active_count = active_count + 1 WHERE ip_group = ip_group_in;
+    UPDATE group_state SET active_count = active_count + 1, last_active = NOW() WHERE ip_group = ip_group_in;
     INSERT INTO active_request (request_id, ip_group) VALUES (request_id_in, ip_group_in);
     admitted := TRUE;
   END IF;
@@ -52,11 +60,17 @@ CREATE OR REPLACE FUNCTION enqueue_if_room(
 ) RETURNS BOOLEAN AS $$
 DECLARE enqueued BOOLEAN := FALSE;
 BEGIN
-  INSERT INTO group_state (ip_group) VALUES (ip_group_in) ON CONFLICT DO NOTHING;
-  PERFORM 1 FROM group_state WHERE ip_group = ip_group_in FOR UPDATE;
+  -- retry loop: a concurrent prune_idle_groups can delete the row between the
+  -- INSERT and the FOR UPDATE lock below, so keep re-inserting until the lock
+  -- actually lands on a row that exists
+  LOOP
+    INSERT INTO group_state (ip_group) VALUES (ip_group_in) ON CONFLICT DO NOTHING;
+    PERFORM 1 FROM group_state WHERE ip_group = ip_group_in FOR UPDATE;
+    EXIT WHEN FOUND;
+  END LOOP;
 
   IF (SELECT pending_count FROM group_state WHERE ip_group = ip_group_in) < max_pending_in THEN
-    UPDATE group_state SET pending_count = pending_count + 1 WHERE ip_group = ip_group_in;
+    UPDATE group_state SET pending_count = pending_count + 1, last_active = NOW() WHERE ip_group = ip_group_in;
     INSERT INTO pending_request (request_id, ip_group) VALUES (request_id_in, ip_group_in);
     enqueued := TRUE;
   END IF;
@@ -81,7 +95,7 @@ BEGIN
     -- already removed by a concurrent reconcile_stale (or a duplicate call),
     -- active_count has already been corrected and must not be decremented
     -- again, or it would under-count and let an extra request slip in
-    UPDATE group_state SET active_count = GREATEST(active_count - 1, 0) WHERE ip_group = ip_group_in;
+    UPDATE group_state SET active_count = GREATEST(active_count - 1, 0), last_active = NOW() WHERE ip_group = ip_group_in;
   END IF;
 
   SELECT request_id INTO promoted_id FROM pending_request
@@ -90,7 +104,7 @@ BEGIN
   IF promoted_id IS NOT NULL THEN
     DELETE FROM pending_request WHERE request_id = promoted_id;
     UPDATE group_state
-      SET pending_count = GREATEST(pending_count - 1, 0), active_count = active_count + 1
+      SET pending_count = GREATEST(pending_count - 1, 0), active_count = active_count + 1, last_active = NOW()
       WHERE ip_group = ip_group_in;
     INSERT INTO active_request (request_id, ip_group) VALUES (promoted_id, ip_group_in);
   END IF;
@@ -112,7 +126,7 @@ BEGIN
 
   DELETE FROM pending_request WHERE request_id = request_id_in;
   IF FOUND THEN
-    UPDATE group_state SET pending_count = GREATEST(pending_count - 1, 0) WHERE ip_group = ip_group_in;
+    UPDATE group_state SET pending_count = GREATEST(pending_count - 1, 0), last_active = NOW() WHERE ip_group = ip_group_in;
     removed := TRUE;
   END IF;
 
@@ -129,12 +143,36 @@ BEGIN
   DELETE FROM active_request WHERE created < NOW() - (stale_ms_in || ' milliseconds')::interval;
   GET DIAGNOSTICS removed = ROW_COUNT;
 
-  UPDATE group_state gs SET active_count = COALESCE(sub.cnt, 0)
+  UPDATE group_state gs SET active_count = COALESCE(sub.cnt, 0), last_active = NOW()
     FROM (SELECT ip_group, COUNT(*) AS cnt FROM active_request GROUP BY ip_group) sub
     WHERE gs.ip_group = sub.ip_group;
 
-  UPDATE group_state SET active_count = 0
-    WHERE ip_group NOT IN (SELECT ip_group FROM active_request);
+  -- only bump last_active for groups actually transitioning to 0; otherwise
+  -- this would refresh every already-idle group's timestamp on every sweep
+  -- tick and permanently defeat prune_idle_groups below
+  UPDATE group_state SET active_count = 0, last_active = NOW()
+    WHERE ip_group NOT IN (SELECT ip_group FROM active_request)
+      AND active_count <> 0;
+
+  RETURN removed;
+END;
+$$ LANGUAGE plpgsql
+SET search_path = {{SCHEMA}}, public;
+
+-- delete group_state rows that have had zero active and zero pending
+-- requests for at least idle_ms_in, keeping the table from growing
+-- unbounded as new ip groups are seen over time. Safe against a concurrent
+-- try_admit/enqueue_if_room re-creating the row immediately after: their
+-- retry-loop + ON CONFLICT DO NOTHING means a reappearing group simply gets
+-- a fresh row with DEFAULT last_active = NOW() and counts of 0.
+CREATE OR REPLACE FUNCTION prune_idle_groups(idle_ms_in BIGINT) RETURNS INT AS $$
+DECLARE removed INT;
+BEGIN
+  DELETE FROM group_state
+    WHERE active_count = 0
+      AND pending_count = 0
+      AND last_active < NOW() - (idle_ms_in || ' milliseconds')::interval;
+  GET DIAGNOSTICS removed = ROW_COUNT;
 
   RETURN removed;
 END;

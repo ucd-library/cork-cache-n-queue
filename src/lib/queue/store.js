@@ -126,6 +126,24 @@ class QueueStore {
     );
     return resp.rows[0].removed;
   }
+
+  /**
+   * @method pruneIdleGroups
+   * @description delete group_state rows that have had zero active and zero
+   * pending requests for at least idleMs, keeping the table from growing
+   * unbounded as new ip groups are seen over time.
+   *
+   * @param {Number} idleMs idle duration in milliseconds after which a fully
+   * idle group's row is removed
+   * @returns {Promise<Number>} number of rows removed
+   */
+  async pruneIdleGroups(idleMs) {
+    let resp = await this.db.query(
+      `SELECT ${this.schema}.prune_idle_groups($1) AS removed`,
+      [idleMs]
+    );
+    return resp.rows[0].removed;
+  }
 }
 
 export { QueueStore };

@@ -76,6 +76,7 @@ async function buildServer(cfg) {
       rules,
       logger: getLogger('queue')
     });
+    queue.startSweeping();
     logger.info('queue: enabled');
   } else {
     logger.info('queue: disabled');
@@ -103,15 +104,16 @@ async function buildServer(cfg) {
 
 /**
  * @function shutdown
- * @description stop accepting new connections, stop the cache sweep timer,
- * and close the Postgres pool (if any). Does not call process.exit - callers
- * that want the process to actually terminate do so themselves once this
- * resolves (see main()'s signal handlers below).
+ * @description stop accepting new connections, stop the queue/cache sweep
+ * timers, and close the Postgres pool (if any). Does not call process.exit -
+ * callers that want the process to actually terminate do so themselves once
+ * this resolves (see main()'s signal handlers below).
  *
- * @param {Object} opts {server, db, cache}
+ * @param {Object} opts {server, db, queue, cache}
  * @returns {Promise<void>}
  */
-function shutdown({ server, db, cache }) {
+function shutdown({ server, db, queue, cache }) {
+  if (queue) queue.stopSweeping();
   if (cache) cache.stopSweeping();
   return new Promise(resolve => {
     server.close(async () => {
@@ -137,7 +139,7 @@ async function main() {
     process.exit(1);
   }
 
-  let { server, db, cache } = await buildServer(config);
+  let { server, db, queue, cache } = await buildServer(config);
 
   let shuttingDown = false;
 
@@ -145,7 +147,7 @@ async function main() {
     if (shuttingDown) return;
     shuttingDown = true;
     logger.info(`${signal} received, shutting down`);
-    shutdown({ server, db, cache }).then(() => process.exit(0));
+    shutdown({ server, db, queue, cache }).then(() => process.exit(0));
   }
 
   process.on('SIGTERM', () => handleSignal('SIGTERM'));

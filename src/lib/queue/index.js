@@ -31,7 +31,8 @@ class Queue {
    * @param {Object} opts
    * @param {Object} opts.config queue settings: methods, maxServedPerGroup,
    * maxPendingPerGroup, pendingTimeoutMs, pollIntervalMs, ipv4PrefixLength,
-   * ipv6PrefixLength, staleActiveMs, clientIpHeader
+   * ipv6PrefixLength, staleActiveMs, sweepIntervalMs, idleGroupMs,
+   * maxActiveDurationMs, clientIpHeader
    * @param {QueueStore} opts.store Postgres-backed queue store
    * @param {Object} opts.allowlist {isAllowed(ip)}, see ./allowlist.js
    * @param {Array<Array<Object>>} opts.rules compiled queue ruleset, see ../rules/load-rules.js
@@ -43,6 +44,55 @@ class Queue {
     this.allowlist = opts.allowlist;
     this.rules = opts.rules;
     this.logger = opts.logger;
+    this._sweepTimer = null;
+  }
+
+  /**
+   * @method startSweeping
+   * @description start the background timer that reconciles stale active
+   * rows (crash recovery) and prunes fully-idle group_state rows, so both
+   * run reliably on a schedule rather than only opportunistically. Safe to
+   * call more than once; only one timer is ever active.
+   *
+   * @returns {void}
+   */
+  startSweeping() {
+    if (this._sweepTimer) return;
+    this._sweepTimer = setInterval(() => this._sweep(), this.config.sweepIntervalMs);
+    this._sweepTimer.unref();
+  }
+
+  /**
+   * @method stopSweeping
+   * @description stop the background sweep timer, if running.
+   *
+   * @returns {void}
+   */
+  stopSweeping() {
+    if (!this._sweepTimer) return;
+    clearInterval(this._sweepTimer);
+    this._sweepTimer = null;
+  }
+
+  /**
+   * @method _sweep
+   * @description one scheduled sweep tick: crash-recovery reconciliation
+   * followed by idle group_state cleanup. Each step is independently
+   * try/caught so one failing doesn't block the other.
+   *
+   * @returns {Promise<void>}
+   */
+  async _sweep() {
+    try {
+      await this.store.reconcileStale(this.config.staleActiveMs);
+    } catch (e) {
+      this.logger.error('queue: postgres error on scheduled reconcileStale', e);
+    }
+    try {
+      await this.store.pruneIdleGroups(this.config.idleGroupMs);
+    } catch (e) {
+      this.logger.error('queue: postgres error on scheduled pruneIdleGroups', e);
+    }
   }
 
   /**
@@ -148,7 +198,9 @@ class Queue {
    * @method _attachReleaseHooks
    * @description attach completion/cleanup listeners to the response so an
    * active slot is always released (and the next queued request promoted)
-   * exactly once, regardless of how the request ends.
+   * exactly once, regardless of how the request ends. When
+   * maxActiveDurationMs is configured (> 0), also force-disconnects the
+   * request if it's still active once that duration elapses.
    *
    * @param {Object} req express request object
    * @param {Object} res express response object
@@ -157,14 +209,32 @@ class Queue {
    */
   _attachReleaseHooks(req, res, requestId, group) {
     let released = false;
+    let durationTimer = null;
+
     let release = () => {
       if (released) return;
       released = true;
+      if (durationTimer) clearTimeout(durationTimer);
       this.store.releaseAndPromote(requestId, group)
         .catch(e => this.logger.error('queue: postgres error on releaseAndPromote', e));
     };
     res.on('finish', release);
     res.on('close', release);
+
+    if (this.config.maxActiveDurationMs > 0) {
+      // no error/response body is sent here by design - this is a hard
+      // disconnect, not a graceful error: headers may already be flushed for
+      // a streaming response, so there's no way to tell the client anything
+      // meaningful. Destroying res fires its 'close' event, which triggers
+      // `release` above and, separately, the proxy's own close handler
+      // (src/lib/proxy/index.js) aborting the upstream fetch.
+      durationTimer = setTimeout(() => {
+        if (released) return;
+        this.logger.warn(`queue: force-disconnecting request ${requestId} (group ${group}) after exceeding max active duration ${this.config.maxActiveDurationMs}ms`);
+        res.destroy();
+      }, this.config.maxActiveDurationMs);
+      durationTimer.unref();
+    }
   }
 
   /**

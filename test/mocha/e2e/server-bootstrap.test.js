@@ -17,7 +17,7 @@ function baseCfg(overrides = {}) {
     upstreamUrl: '',
     clientIpHeader: '',
     postgres: config.postgres,
-    queue: { enabled: false, rulesFile: '', methods: [], maxServedPerGroup: 1, maxPendingPerGroup: 1, pendingTimeoutMs: 500, pollIntervalMs: 50, ipv4PrefixLength: 24, ipv6PrefixLength: 64, staleActiveMs: 300000, allowlist: '' },
+    queue: { enabled: false, rulesFile: '', methods: [], maxServedPerGroup: 1, maxPendingPerGroup: 1, pendingTimeoutMs: 500, pollIntervalMs: 50, ipv4PrefixLength: 24, ipv6PrefixLength: 64, staleActiveMs: 300000, sweepIntervalMs: 60000, idleGroupMs: 3600000, maxActiveDurationMs: 0, allowlist: '' },
     cache: { enabled: false, rulesFile: '', dir: '', maxSizeBytes: 1024 * 1024, maxItemSizeBytes: 1024 * 1024, ttlMs: 60000, respectCacheControl: true, methods: ['GET', 'HEAD'], varyHeaders: [], keyIncludeQuery: true, sweepIntervalMs: 60000 },
     ...overrides
   };
@@ -62,7 +62,7 @@ describe('server bootstrap (buildServer / shutdown)', function () {
 
     built = await buildServer(baseCfg({
       upstreamUrl: origin.url,
-      queue: { enabled: true, rulesFile: QUEUE_RULES_FILE, methods: ['GET'], maxServedPerGroup: 1, maxPendingPerGroup: 1, pendingTimeoutMs: 500, pollIntervalMs: 50, ipv4PrefixLength: 24, ipv6PrefixLength: 64, staleActiveMs: 300000, allowlist: '' }
+      queue: { enabled: true, rulesFile: QUEUE_RULES_FILE, methods: ['GET'], maxServedPerGroup: 1, maxPendingPerGroup: 1, pendingTimeoutMs: 500, pollIntervalMs: 50, ipv4PrefixLength: 24, ipv6PrefixLength: 64, staleActiveMs: 300000, sweepIntervalMs: 60000, idleGroupMs: 3600000, maxActiveDurationMs: 0, allowlist: '' }
     }));
 
     assert.ok(built.db, 'expected a real Db instance when the queue is enabled');
@@ -76,8 +76,13 @@ describe('server bootstrap (buildServer / shutdown)', function () {
     let originalEnd = built.db.end.bind(built.db);
     built.db.end = async () => { dbEnded = true; return originalEnd(); };
 
+    let sweepStopped = false;
+    let originalStopSweeping = built.queue.stopSweeping.bind(built.queue);
+    built.queue.stopSweeping = () => { sweepStopped = true; return originalStopSweeping(); };
+
     await shutdown(built);
     assert.strictEqual(dbEnded, true, 'shutdown must end the Postgres pool when the queue was enabled');
+    assert.strictEqual(sweepStopped, true, 'shutdown must stop the queue sweep timer when the queue was enabled');
     built = null;
   });
 

@@ -24,9 +24,12 @@ function fakeRes() {
   res.statusCode = null;
   res.headers = {};
   res.body = null;
+  res.destroyed = false;
   res.status = (code) => { res.statusCode = code; return res; };
   res.set = (name, value) => { res.headers[name] = value; return res; };
   res.send = (body) => { res.body = body; return res; };
+  // mirrors http.ServerResponse: destroying an in-flight response emits 'close'
+  res.destroy = () => { if (res.destroyed) return; res.destroyed = true; res.emit('close'); };
   return res;
 }
 
@@ -229,5 +232,104 @@ describe('Queue admission gate (Postgres)', function () {
 
     let result = await queue.admit(fakeReq({ path: '/something-else' }), fakeRes());
     assert.strictEqual(result, true);
+  });
+
+  it('force-disconnects an active request once maxActiveDurationMs elapses', async () => {
+    let queue = buildQueue(db, { config: { maxServedPerGroup: 1, maxPendingPerGroup: 1, maxActiveDurationMs: 50 } });
+
+    let req = fakeReq({ remoteAddress: '203.0.113.60' });
+    let res = fakeRes();
+
+    assert.strictEqual(await queue.admit(req, res), true);
+    assert.strictEqual(res.destroyed, false);
+
+    await new Promise(resolve => setTimeout(resolve, 150));
+
+    assert.strictEqual(res.destroyed, true, 'the response should be force-destroyed after exceeding maxActiveDurationMs');
+
+    let group = queue.getIpGroup(req);
+    let resp = await db.query(`SELECT active_count FROM ${config.postgres.schema}.group_state WHERE ip_group = $1`, [group]);
+    assert.strictEqual(resp.rows[0].active_count, 0, 'the active slot should be released once destroyed');
+  });
+
+  it('does not force-disconnect a request that finishes before maxActiveDurationMs', async () => {
+    let queue = buildQueue(db, { config: { maxServedPerGroup: 1, maxPendingPerGroup: 1, maxActiveDurationMs: 200 } });
+
+    let req = fakeReq({ remoteAddress: '203.0.113.61' });
+    let res = fakeRes();
+
+    assert.strictEqual(await queue.admit(req, res), true);
+    res.emit('finish');
+
+    await new Promise(resolve => setTimeout(resolve, 250));
+
+    assert.strictEqual(res.destroyed, false, 'a request that already finished must never be force-destroyed later');
+  });
+
+  it('leaves maxActiveDurationMs disabled (0) as a no-op', async () => {
+    let queue = buildQueue(db, { config: { maxServedPerGroup: 1, maxPendingPerGroup: 1, maxActiveDurationMs: 0 } });
+
+    let req = fakeReq({ remoteAddress: '203.0.113.62' });
+    let res = fakeRes();
+
+    assert.strictEqual(await queue.admit(req, res), true);
+    await new Promise(resolve => setTimeout(resolve, 100));
+
+    assert.strictEqual(res.destroyed, false, 'maxActiveDurationMs=0 must never force-disconnect');
+  });
+});
+
+describe('Queue background sweeping', function () {
+  this.timeout(20000);
+  let db;
+
+  before(async () => {
+    db = new Db({ postgres: config.postgres });
+  });
+
+  beforeEach(async () => {
+    await resetQueueSchema(db, config.postgres.schema);
+  });
+
+  after(async () => {
+    await db.end();
+  });
+
+  it('startSweeping runs reconcileStale and pruneIdleGroups on an interval, and stopSweeping stops it', async () => {
+    let queue = buildQueue(db, { config: { sweepIntervalMs: 30, staleActiveMs: 300000, idleGroupMs: 3600000 } });
+
+    let reconcileCalls = 0;
+    let pruneCalls = 0;
+    queue.store.reconcileStale = async () => { reconcileCalls++; return 0; };
+    queue.store.pruneIdleGroups = async () => { pruneCalls++; return 0; };
+
+    queue.startSweeping();
+    queue.startSweeping(); // idempotent: must not create a second timer
+
+    await new Promise(resolve => setTimeout(resolve, 110));
+    queue.stopSweeping();
+
+    assert.ok(reconcileCalls >= 2, `expected multiple sweep ticks, got ${reconcileCalls}`);
+    assert.ok(pruneCalls >= 2, `expected multiple sweep ticks, got ${pruneCalls}`);
+
+    let callsAtStop = reconcileCalls;
+    await new Promise(resolve => setTimeout(resolve, 80));
+    assert.strictEqual(reconcileCalls, callsAtStop, 'no further ticks should run after stopSweeping');
+
+    queue.stopSweeping(); // idempotent: must not throw when already stopped
+  });
+
+  it('a scheduled sweep error on one store call does not block the other', async () => {
+    let queue = buildQueue(db, { config: { sweepIntervalMs: 30 } });
+
+    let pruneCalls = 0;
+    queue.store.reconcileStale = async () => { throw new Error('boom'); };
+    queue.store.pruneIdleGroups = async () => { pruneCalls++; return 0; };
+
+    queue.startSweeping();
+    await new Promise(resolve => setTimeout(resolve, 80));
+    queue.stopSweeping();
+
+    assert.ok(pruneCalls >= 1, 'pruneIdleGroups must still run even when reconcileStale throws');
   });
 });

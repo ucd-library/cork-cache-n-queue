@@ -61,6 +61,9 @@ const config = {
     ipv4PrefixLength: parseIntOr(env.CCNQ_QUEUE_IPV4_PREFIX_LENGTH, 24),
     ipv6PrefixLength: parseIntOr(env.CCNQ_QUEUE_IPV6_PREFIX_LENGTH, 64),
     staleActiveMs: parseIntOr(env.CCNQ_QUEUE_STALE_ACTIVE_MS, 300000),
+    sweepIntervalMs: parseIntOr(env.CCNQ_QUEUE_SWEEP_INTERVAL_MS, 60000),
+    idleGroupMs: parseIntOr(env.CCNQ_QUEUE_IDLE_GROUP_MS, 3600000),
+    maxActiveDurationMs: parseIntOr(env.CCNQ_QUEUE_MAX_ACTIVE_DURATION_MS, 0),
     allowlist: env.CCNQ_QUEUE_ALLOWLIST || ''
   },
 

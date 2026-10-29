@@ -154,4 +154,78 @@ describe('QueueStore (Postgres)', function () {
     await store.releaseAndPromote(requestId, group);
     assert.strictEqual(await store.isActive(requestId), false);
   });
+
+  it('pruneIdleGroups removes a fully idle group_state row past the idle window', async () => {
+    let group = 'test-group-' + id();
+    let requestId = id();
+
+    await store.tryAdmit(requestId, group, 1);
+    await store.releaseAndPromote(requestId, group);
+
+    await db.query(
+      `UPDATE ${config.postgres.schema}.group_state SET last_active = NOW() - interval '1 hour' WHERE ip_group = $1`,
+      [group]
+    );
+
+    let removed = await store.pruneIdleGroups(60000);
+    assert.strictEqual(removed, 1);
+
+    let resp = await db.query(`SELECT * FROM ${config.postgres.schema}.group_state WHERE ip_group = $1`, [group]);
+    assert.strictEqual(resp.rows.length, 0);
+  });
+
+  it('pruneIdleGroups leaves rows with nonzero counts or recent activity alone', async () => {
+    let idleGroup = 'test-group-' + id();
+    let busyGroup = 'test-group-' + id();
+    let recentGroup = 'test-group-' + id();
+
+    // idle but not past the window yet
+    let recentId = id();
+    await store.tryAdmit(recentId, recentGroup, 1);
+    await store.releaseAndPromote(recentId, recentGroup);
+
+    // still has an active request, so counts are nonzero
+    await store.tryAdmit(id(), busyGroup, 1);
+
+    // genuinely idle and old enough to prune, used as a control
+    let idleId = id();
+    await store.tryAdmit(idleId, idleGroup, 1);
+    await store.releaseAndPromote(idleId, idleGroup);
+    await db.query(
+      `UPDATE ${config.postgres.schema}.group_state SET last_active = NOW() - interval '1 hour' WHERE ip_group = $1`,
+      [idleGroup]
+    );
+
+    let removed = await store.pruneIdleGroups(60000);
+    assert.strictEqual(removed, 1);
+
+    assert.strictEqual((await db.query(`SELECT * FROM ${config.postgres.schema}.group_state WHERE ip_group = $1`, [recentGroup])).rows.length, 1);
+    assert.strictEqual((await db.query(`SELECT * FROM ${config.postgres.schema}.group_state WHERE ip_group = $1`, [busyGroup])).rows.length, 1);
+    assert.strictEqual((await db.query(`SELECT * FROM ${config.postgres.schema}.group_state WHERE ip_group = $1`, [idleGroup])).rows.length, 0);
+  });
+
+  it('tryAdmit still admits correctly when racing a concurrent prune of its own just-emptied group', async () => {
+    let group = 'test-group-' + id();
+    let first = id();
+
+    // make the group exist, then go idle and old enough to be prune-eligible
+    await store.tryAdmit(first, group, 1);
+    await store.releaseAndPromote(first, group);
+    await db.query(
+      `UPDATE ${config.postgres.schema}.group_state SET last_active = NOW() - interval '1 hour' WHERE ip_group = $1`,
+      [group]
+    );
+
+    // race a prune against a fresh admission for the same group; regardless
+    // of ordering, the admission must succeed exactly once (the retry-loop
+    // in try_admit guards against the row disappearing mid-function)
+    let second = id();
+    let [, admitted] = await Promise.all([
+      store.pruneIdleGroups(60000),
+      store.tryAdmit(second, group, 1)
+    ]);
+
+    assert.strictEqual(admitted, true, 'tryAdmit must not be defeated by a concurrent prune of its own group');
+    assert.strictEqual(await store.isActive(second), true);
+  });
 });

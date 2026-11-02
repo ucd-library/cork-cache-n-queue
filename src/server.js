@@ -5,8 +5,10 @@ import config from './lib/config.js';
 import { getLogger } from './lib/logger.js';
 import { Db } from './lib/db/pool.js';
 import { QueueStore } from './lib/queue/store.js';
+import { DenylistStore } from './lib/queue/denylist-store.js';
 import { createAllowlist } from './lib/queue/allowlist.js';
 import { Queue } from './lib/queue/index.js';
+import { Denylist } from './lib/queue/denylist.js';
 import { DiskCache } from './lib/cache/index.js';
 import { loadRuleset } from './lib/rules/load-rules.js';
 import { createApp } from './app.js';
@@ -54,16 +56,18 @@ function validateStartupConfig(cfg) {
  * validated by validateStartupConfig().
  *
  * @param {Object} cfg config object, see ./lib/config.js
- * @returns {Promise<Object>} {server, db, queue, cache} - db/queue/cache are
- * null when their respective gate is disabled
+ * @returns {Promise<Object>} {server, db, queue, cache, denylist} -
+ * db/queue/cache/denylist are null when their respective gate is disabled
  */
 async function buildServer(cfg) {
   let db = null;
   let queue = null;
+  let denylist = null;
 
   if (cfg.queue.enabled) {
     db = new Db({ postgres: cfg.postgres });
     await db.init(path.join(__dirname, '..', 'sql', '001-queue.sql'));
+    await db.init(path.join(__dirname, '..', 'sql', '002-queue-denylist.sql'));
 
     let store = new QueueStore({ db, schema: cfg.postgres.schema });
     let allowlist = createAllowlist(cfg.queue.allowlist);
@@ -78,6 +82,24 @@ async function buildServer(cfg) {
     });
     queue.startSweeping();
     logger.info('queue: enabled');
+
+    if (cfg.queue.denylist.enabled) {
+      let denylistStore = new DenylistStore({ db, schema: cfg.postgres.schema });
+      denylist = new Denylist({
+        config: {
+          ...cfg.queue.denylist,
+          blockMs: cfg.queue.denylist.blockDays * 24 * 60 * 60 * 1000,
+          clientIpHeader: cfg.clientIpHeader
+        },
+        store: denylistStore,
+        allowlist,
+        logger: getLogger('queue:denylist')
+      });
+      denylist.startSweeping();
+      logger.info('queue denylist: enabled');
+    } else {
+      logger.info('queue denylist: disabled');
+    }
   } else {
     logger.info('queue: disabled');
   }
@@ -93,13 +115,13 @@ async function buildServer(cfg) {
     logger.info('cache: disabled');
   }
 
-  let app = createApp({ cache, queue, upstreamUrl: cfg.upstreamUrl, logger });
+  let app = createApp({ cache, queue, denylist, upstreamUrl: cfg.upstreamUrl, logger });
   let server = http.createServer(app);
 
   await new Promise(resolve => server.listen(cfg.port, resolve));
   logger.info(`cork-cache-n-queue listening on port ${server.address().port}`);
 
-  return { server, db, queue, cache };
+  return { server, db, queue, cache, denylist };
 }
 
 /**
@@ -109,11 +131,12 @@ async function buildServer(cfg) {
  * callers that want the process to actually terminate do so themselves once
  * this resolves (see main()'s signal handlers below).
  *
- * @param {Object} opts {server, db, queue, cache}
+ * @param {Object} opts {server, db, queue, cache, denylist}
  * @returns {Promise<void>}
  */
-function shutdown({ server, db, queue, cache }) {
+function shutdown({ server, db, queue, cache, denylist }) {
   if (queue) queue.stopSweeping();
+  if (denylist) denylist.stopSweeping();
   if (cache) cache.stopSweeping();
   return new Promise(resolve => {
     server.close(async () => {
@@ -139,7 +162,7 @@ async function main() {
     process.exit(1);
   }
 
-  let { server, db, queue, cache } = await buildServer(config);
+  let { server, db, queue, cache, denylist } = await buildServer(config);
 
   let shuttingDown = false;
 
@@ -147,7 +170,7 @@ async function main() {
     if (shuttingDown) return;
     shuttingDown = true;
     logger.info(`${signal} received, shutting down`);
-    shutdown({ server, db, queue, cache }).then(() => process.exit(0));
+    shutdown({ server, db, queue, cache, denylist }).then(() => process.exit(0));
   }
 
   process.on('SIGTERM', () => handleSignal('SIGTERM'));

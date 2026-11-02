@@ -4,24 +4,37 @@ import { proxyRequest } from '../lib/proxy/index.js';
 /**
  * @function createGatewayHandler
  * @description build the single catch-all request handler implementing the
- * full gate order: cache check (a hit bypasses the queue and origin
- * entirely) -> queue admission gate -> proxy to the upstream origin -> cache
- * write (if eligible). Every response carries an `X-Cache` header of `HIT`,
- * `MISS`, or `BYPASS` (not in the cache's configured scope at all) so
- * callers can tell which path served the response.
+ * full gate order: denylist block-check (an ip currently blocked gets an
+ * immediate 429, before cache or queue even run) -> cache check (a hit
+ * bypasses the queue and origin entirely) -> queue admission gate (a
+ * queue-issued 429 is recorded against the client ip for denylist tracking)
+ * -> proxy to the upstream origin -> cache write (if eligible). Every
+ * response carries an `X-Cache` header of `HIT`, `MISS`, or `BYPASS` (not in
+ * the cache's configured scope at all) so callers can tell which path served
+ * the response.
  *
  * @param {Object} opts
  * @param {Object} [opts.cache] DiskCache instance, or omitted if the cache is disabled
  * @param {Object} [opts.queue] Queue instance, or omitted if the queue is disabled
+ * @param {Object} [opts.denylist] Denylist instance, or omitted if disabled
  * @param {String} opts.upstreamUrl base URL of the upstream origin
  * @param {Object} opts.logger logger instance
  * @returns {Function} express request handler
  */
 function createGatewayHandler(opts) {
-  let { cache, queue, upstreamUrl, logger } = opts;
+  let { cache, queue, denylist, upstreamUrl, logger } = opts;
 
   return async function gatewayHandler(req, res) {
     try {
+      if (denylist) {
+        let ip = denylist.getClientIp(req);
+        let retryAfterSeconds = await denylist.isBlocked(ip);
+        if (retryAfterSeconds !== null) {
+          res.status(429).set('Retry-After', String(retryAfterSeconds)).send('Too many prior violations, temporarily blocked');
+          return;
+        }
+      }
+
       let cacheKey = null;
       let cacheEligible = false;
 
@@ -43,7 +56,19 @@ function createGatewayHandler(opts) {
 
       if (queue) {
         let admitted = await queue.admit(req, res);
-        if (!admitted) return; // queue already sent a 429, or the client disconnected while waiting
+        if (!admitted) {
+          // queue already sent a 429, or the client disconnected while
+          // waiting. Only an actual 429 counts as a denial - checking
+          // res.statusCode (set synchronously by Queue.admit before it
+          // returns false in both of its 429 paths) distinguishes that
+          // from the "disconnected" case, which returns false without
+          // sending any response at all. recordDenial() never rejects, so
+          // it's safe to fire-and-forget.
+          if (denylist && res.statusCode === 429) {
+            denylist.recordDenial(denylist.getClientIp(req));
+          }
+          return;
+        }
       }
 
       let cacheSink = cacheEligible ? cache.beginWrite(cacheKey) : null;

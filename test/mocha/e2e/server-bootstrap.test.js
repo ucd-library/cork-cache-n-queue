@@ -17,7 +17,7 @@ function baseCfg(overrides = {}) {
     upstreamUrl: '',
     clientIpHeader: '',
     postgres: config.postgres,
-    queue: { enabled: false, rulesFile: '', methods: [], maxServedPerGroup: 1, maxPendingPerGroup: 1, pendingTimeoutMs: 500, pollIntervalMs: 50, ipv4PrefixLength: 24, ipv6PrefixLength: 64, staleActiveMs: 300000, sweepIntervalMs: 60000, idleGroupMs: 3600000, maxActiveDurationMs: 0, allowlist: '' },
+    queue: { enabled: false, rulesFile: '', methods: [], maxServedPerGroup: 1, maxPendingPerGroup: 1, pendingTimeoutMs: 500, pollIntervalMs: 50, ipv4PrefixLength: 24, ipv6PrefixLength: 64, staleActiveMs: 300000, sweepIntervalMs: 60000, idleGroupMs: 3600000, maxActiveDurationMs: 0, allowlist: '', denylist: { enabled: false } },
     cache: { enabled: false, rulesFile: '', dir: '', maxSizeBytes: 1024 * 1024, maxItemSizeBytes: 1024 * 1024, ttlMs: 60000, respectCacheControl: true, methods: ['GET', 'HEAD'], varyHeaders: [], keyIncludeQuery: true, sweepIntervalMs: 60000 },
     ...overrides
   };
@@ -62,7 +62,7 @@ describe('server bootstrap (buildServer / shutdown)', function () {
 
     built = await buildServer(baseCfg({
       upstreamUrl: origin.url,
-      queue: { enabled: true, rulesFile: QUEUE_RULES_FILE, methods: ['GET'], maxServedPerGroup: 1, maxPendingPerGroup: 1, pendingTimeoutMs: 500, pollIntervalMs: 50, ipv4PrefixLength: 24, ipv6PrefixLength: 64, staleActiveMs: 300000, sweepIntervalMs: 60000, idleGroupMs: 3600000, maxActiveDurationMs: 0, allowlist: '' }
+      queue: { enabled: true, rulesFile: QUEUE_RULES_FILE, methods: ['GET'], maxServedPerGroup: 1, maxPendingPerGroup: 1, pendingTimeoutMs: 500, pollIntervalMs: 50, ipv4PrefixLength: 24, ipv6PrefixLength: 64, staleActiveMs: 300000, sweepIntervalMs: 60000, idleGroupMs: 3600000, maxActiveDurationMs: 0, allowlist: '', denylist: { enabled: false } }
     }));
 
     assert.ok(built.db, 'expected a real Db instance when the queue is enabled');

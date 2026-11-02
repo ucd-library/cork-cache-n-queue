@@ -64,7 +64,20 @@ const config = {
     sweepIntervalMs: parseIntOr(env.CCNQ_QUEUE_SWEEP_INTERVAL_MS, 60000),
     idleGroupMs: parseIntOr(env.CCNQ_QUEUE_IDLE_GROUP_MS, 3600000),
     maxActiveDurationMs: parseIntOr(env.CCNQ_QUEUE_MAX_ACTIVE_DURATION_MS, 0),
-    allowlist: env.CCNQ_QUEUE_ALLOWLIST || ''
+    allowlist: env.CCNQ_QUEUE_ALLOWLIST || '',
+
+    denylist: {
+      // only consulted when queue.enabled is also true (see buildServer in
+      // server.js) - defaulting true here can't break the zero-config
+      // "both gates off" startup path, since it's simply never read then
+      enabled: env.CCNQ_QUEUE_DENYLIST_ENABLED !== 'false',
+      dailyThreshold: parseIntOr(env.CCNQ_QUEUE_DENYLIST_DAILY_THRESHOLD, 25),
+      windowDays: parseIntOr(env.CCNQ_QUEUE_DENYLIST_WINDOW_DAYS, 14),
+      exceedThreshold: parseIntOr(env.CCNQ_QUEUE_DENYLIST_EXCEED_THRESHOLD, 5),
+      blockDays: parseIntOr(env.CCNQ_QUEUE_DENYLIST_BLOCK_DAYS, 30),
+      sweepIntervalMs: parseIntOr(env.CCNQ_QUEUE_DENYLIST_SWEEP_INTERVAL_MS, 60000),
+      pruneRetentionMs: parseIntOr(env.CCNQ_QUEUE_DENYLIST_PRUNE_RETENTION_MS, 30 * 24 * 60 * 60 * 1000)
+    }
   },
 
   cache: {

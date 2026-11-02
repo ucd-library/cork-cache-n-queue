@@ -18,6 +18,7 @@ import { createGatewayHandler } from './controllers/gateway.js';
  * @param {Object} opts
  * @param {Object} [opts.cache] DiskCache instance, or omitted if the cache is disabled
  * @param {Object} [opts.queue] Queue instance, or omitted if the queue is disabled
+ * @param {Object} [opts.denylist] Denylist instance, or omitted if disabled
  * @param {String} opts.upstreamUrl base URL of the upstream origin
  * @param {Object} opts.logger logger instance
  * @returns {Object} express app

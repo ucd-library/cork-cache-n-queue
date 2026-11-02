@@ -11,6 +11,7 @@ const execFileAsync = promisify(execFile);
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SQL_FILE = path.join(__dirname, '..', '..', 'sql', '001-queue.sql');
+const DENYLIST_SQL_FILE = path.join(__dirname, '..', '..', 'sql', '002-queue-denylist.sql');
 
 const POSTGRES_IMAGE = process.env.CCNQ_TEST_POSTGRES_IMAGE || 'postgres:16';
 const POSTGRES_USER = 'postgres';
@@ -137,6 +138,7 @@ export const mochaHooks = {
 
       let db = new Db({ postgres: config.postgres });
       await db.init(SQL_FILE);
+      await db.init(DENYLIST_SQL_FILE);
       await db.end();
     } catch (err) {
       await stopPostgres().catch(() => {});

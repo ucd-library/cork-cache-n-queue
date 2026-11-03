@@ -22,7 +22,7 @@ class Denylist {
   /**
    * @param {Object} opts
    * @param {Object} opts.config denylist settings: dailyThreshold,
-   * windowDays, exceedThreshold, blockMs, rangeThreshold, rangeBlockMs,
+   * windowDays, exceedThreshold, blockMs, rangeIpThreshold, rangeBlockMs,
    * ipv4PrefixLength, ipv6PrefixLength, sweepIntervalMs, pruneRetentionMs,
    * clientIpHeader
    * @param {DenylistStore} opts.store Postgres-backed denylist store
@@ -152,14 +152,14 @@ class Denylist {
         windowDays: cfg.windowDays,
         exceedThreshold: cfg.exceedThreshold,
         blockMs: cfg.blockMs,
-        rangeThreshold: cfg.rangeThreshold,
+        rangeThreshold: cfg.rangeIpThreshold,
         rangeBlockMs: cfg.rangeBlockMs
       });
       if (ipBlocked) {
         this.logger.warn(`denylist: ip ${ip} blocked (or block extended) after reaching ${cfg.exceedThreshold} threshold-exceeded day(s) within a ${cfg.windowDays}d window`);
       }
       if (rangeBlocked) {
-        this.logger.warn(`denylist: range ${ipGroup} blocked (or block extended) after more than ${cfg.rangeThreshold} distinct ips were denied today`);
+        this.logger.warn(`denylist: range ${ipGroup} blocked (or block extended) after more than ${cfg.rangeIpThreshold} distinct ips were denied today`);
       }
     } catch (e) {
       this.logger.error('denylist: postgres error on recordDenial', e);

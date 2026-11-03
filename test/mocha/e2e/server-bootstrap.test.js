@@ -4,7 +4,9 @@ import os from 'os';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import config from '../../../src/lib/config.js';
+import { Db } from '../../../src/lib/db/pool.js';
 import { buildServer, shutdown } from '../../../src/server.js';
+import { resetQueueSchema, resetDenylistSchema } from '../queue-test-helpers.js';
 import { startServer } from './helpers.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -83,6 +85,57 @@ describe('server bootstrap (buildServer / shutdown)', function () {
     await shutdown(built);
     assert.strictEqual(dbEnded, true, 'shutdown must end the Postgres pool when the queue was enabled');
     assert.strictEqual(sweepStopped, true, 'shutdown must stop the queue sweep timer when the queue was enabled');
+    built = null;
+  });
+
+  it('wires up a real denylist against Postgres, including the range-wide block tier', async () => {
+    origin = await startServer((req, res) => { res.writeHead(200); res.end('ok'); });
+
+    // reset so leftover rows from other test files/runs can't affect this
+    // range's today-count
+    let resetDb = new Db({ postgres: config.postgres });
+    await resetQueueSchema(resetDb, config.postgres.schema);
+    await resetDenylistSchema(resetDb, config.postgres.schema);
+    await resetDb.end();
+
+    built = await buildServer(baseCfg({
+      upstreamUrl: origin.url,
+      clientIpHeader: 'x-test-ip',
+      queue: {
+        enabled: true, rulesFile: QUEUE_RULES_FILE, methods: ['GET'], maxServedPerGroup: 0, maxPendingPerGroup: 0,
+        pendingTimeoutMs: 500, pollIntervalMs: 50, ipv4PrefixLength: 24, ipv6PrefixLength: 64, staleActiveMs: 300000,
+        sweepIntervalMs: 60000, idleGroupMs: 3600000, maxActiveDurationMs: 0, allowlist: '',
+        denylist: {
+          enabled: true, dailyThreshold: 1000, windowDays: 14, exceedThreshold: 1000, blockDays: 30,
+          rangeIpThreshold: 2, rangeBlockHours: 24, sweepIntervalMs: 60000, pruneRetentionMs: 30 * 24 * 60 * 60 * 1000
+        }
+      }
+    }));
+
+    assert.ok(built.denylist, 'expected a real Denylist instance when queue.denylist.enabled is true');
+
+    let port = built.server.address().port;
+
+    // 3 distinct ips in the same /24, each denied once by the saturated queue
+    for (let ip of ['192.0.2.11', '192.0.2.12', '192.0.2.13']) {
+      let r = await fetch(`http://127.0.0.1:${port}/file.pdf`, { headers: { 'x-test-ip': ip } });
+      assert.strictEqual(r.status, 429);
+    }
+
+    // this is the regression guard for the rangeIpThreshold/rangeThreshold
+    // config key mismatch bug: it only passes if Denylist's config actually
+    // receives the real rangeIpThreshold value threaded through from
+    // config.js/buildServer, rather than a hand-built test config
+    let fresh = await fetch(`http://127.0.0.1:${port}/file.pdf`, { headers: { 'x-test-ip': '192.0.2.99' } });
+    assert.strictEqual(fresh.status, 429);
+    assert.ok((await fresh.text()).includes('blocked'), 'expected a never-before-seen ip in the now-blocked range to be rejected by the pre-check');
+
+    let sweepStopped = false;
+    let originalStopSweeping = built.denylist.stopSweeping.bind(built.denylist);
+    built.denylist.stopSweeping = () => { sweepStopped = true; return originalStopSweeping(); };
+
+    await shutdown(built);
+    assert.strictEqual(sweepStopped, true, 'shutdown must stop the denylist sweep timer when it was enabled');
     built = null;
   });
 

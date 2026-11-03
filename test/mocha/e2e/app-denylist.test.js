@@ -55,7 +55,7 @@ describe('e2e: denylist gate', function () {
     let denylist = new Denylist({
       config: {
         dailyThreshold: 1, windowDays: 14, exceedThreshold: 1, blockMs: 30 * DAY_MS,
-        rangeThreshold: 1000, rangeBlockMs: DAY_MS, ipv4PrefixLength: 24, ipv6PrefixLength: 64,
+        rangeIpThreshold: 1000, rangeBlockMs: DAY_MS, ipv4PrefixLength: 24, ipv6PrefixLength: 64,
         clientIpHeader: 'x-test-ip',
         ...overrides.denylistConfig
       },
@@ -134,14 +134,14 @@ describe('e2e: denylist gate', function () {
     assert.strictEqual(hitCount, 1);
   });
 
-  it('more than rangeThreshold distinct ips denied in the same /24 on the same day blocks a never-seen ip in that range', async () => {
+  it('more than rangeIpThreshold distinct ips denied in the same /24 on the same day blocks a never-seen ip in that range', async () => {
     let hitCount = 0;
     origin = await startServer((req, res) => { hitCount++; res.writeHead(200); res.end('ok'); });
 
     let { queue, denylist } = buildGates({
       // dailyThreshold/exceedThreshold kept high so no individual ip ever
       // self-triggers an ip-level block in this test - only the range tier fires
-      denylistConfig: { dailyThreshold: 1000, exceedThreshold: 1000, rangeThreshold: 3, rangeBlockMs: DAY_MS }
+      denylistConfig: { dailyThreshold: 1000, exceedThreshold: 1000, rangeIpThreshold: 3, rangeBlockMs: DAY_MS }
     });
     app = createApp({ cache: null, queue, denylist, upstreamUrl: origin.url, logger: fakeLogger });
     appServer = await startServer(app);
@@ -153,7 +153,7 @@ describe('e2e: denylist gate', function () {
       assert.ok((await r.text()).includes('concurrent'), `${ip}'s own first request should be denied by the queue, not yet by a range block`);
     }
 
-    // the 4th distinct ip pushed the group's today-count to 4, past rangeThreshold=3;
+    // the 4th distinct ip pushed the group's today-count to 4, past rangeIpThreshold=3;
     // a brand-new ip in that same /24 should now be rejected by the pre-check
     let freshIp = '192.0.2.99';
     let r = await fetch(`${appServer.url}/file.pdf`, { headers: { 'x-test-ip': freshIp } });
@@ -167,7 +167,7 @@ describe('e2e: denylist gate', function () {
     origin = await startServer((req, res) => { res.writeHead(200); res.end('ok'); });
 
     let { queue, denylist } = buildGates({
-      denylistConfig: { dailyThreshold: 1000, exceedThreshold: 1000, rangeThreshold: 3, rangeBlockMs: DAY_MS }
+      denylistConfig: { dailyThreshold: 1000, exceedThreshold: 1000, rangeIpThreshold: 3, rangeBlockMs: DAY_MS }
     });
     app = createApp({ cache: null, queue, denylist, upstreamUrl: origin.url, logger: fakeLogger });
     appServer = await startServer(app);

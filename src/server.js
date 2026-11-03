@@ -89,6 +89,9 @@ async function buildServer(cfg) {
         config: {
           ...cfg.queue.denylist,
           blockMs: cfg.queue.denylist.blockDays * 24 * 60 * 60 * 1000,
+          rangeBlockMs: cfg.queue.denylist.rangeBlockHours * 60 * 60 * 1000,
+          ipv4PrefixLength: cfg.queue.ipv4PrefixLength,
+          ipv6PrefixLength: cfg.queue.ipv6PrefixLength,
           clientIpHeader: cfg.clientIpHeader
         },
         store: denylistStore,

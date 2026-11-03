@@ -54,7 +54,9 @@ describe('e2e: denylist gate', function () {
 
     let denylist = new Denylist({
       config: {
-        dailyThreshold: 1, windowDays: 14, exceedThreshold: 1, blockMs: 30 * DAY_MS, clientIpHeader: 'x-test-ip',
+        dailyThreshold: 1, windowDays: 14, exceedThreshold: 1, blockMs: 30 * DAY_MS,
+        rangeThreshold: 1000, rangeBlockMs: DAY_MS, ipv4PrefixLength: 24, ipv6PrefixLength: 64,
+        clientIpHeader: 'x-test-ip',
         ...overrides.denylistConfig
       },
       store: new DenylistStore({ db, schema: config.postgres.schema }),
@@ -130,5 +132,52 @@ describe('e2e: denylist gate', function () {
     let r = await fetch(`${appServer.url}/file.pdf`, { headers: { 'x-test-ip': allowedIp } });
     assert.strictEqual(r.status, 200, 'an allowlisted ip bypasses the denylist pre-check regardless of ip_block state');
     assert.strictEqual(hitCount, 1);
+  });
+
+  it('more than rangeThreshold distinct ips denied in the same /24 on the same day blocks a never-seen ip in that range', async () => {
+    let hitCount = 0;
+    origin = await startServer((req, res) => { hitCount++; res.writeHead(200); res.end('ok'); });
+
+    let { queue, denylist } = buildGates({
+      // dailyThreshold/exceedThreshold kept high so no individual ip ever
+      // self-triggers an ip-level block in this test - only the range tier fires
+      denylistConfig: { dailyThreshold: 1000, exceedThreshold: 1000, rangeThreshold: 3, rangeBlockMs: DAY_MS }
+    });
+    app = createApp({ cache: null, queue, denylist, upstreamUrl: origin.url, logger: fakeLogger });
+    appServer = await startServer(app);
+
+    let rangeIps = ['192.0.2.1', '192.0.2.2', '192.0.2.3', '192.0.2.4'];
+    for (let ip of rangeIps) {
+      let r = await fetch(`${appServer.url}/file.pdf`, { headers: { 'x-test-ip': ip } });
+      assert.strictEqual(r.status, 429);
+      assert.ok((await r.text()).includes('concurrent'), `${ip}'s own first request should be denied by the queue, not yet by a range block`);
+    }
+
+    // the 4th distinct ip pushed the group's today-count to 4, past rangeThreshold=3;
+    // a brand-new ip in that same /24 should now be rejected by the pre-check
+    let freshIp = '192.0.2.99';
+    let r = await fetch(`${appServer.url}/file.pdf`, { headers: { 'x-test-ip': freshIp } });
+    assert.strictEqual(r.status, 429);
+    assert.ok((await r.text()).includes('blocked'), 'a never-before-seen ip in a blocked range should be rejected by the pre-check');
+
+    assert.strictEqual(hitCount, 0, 'the origin should never have been reached');
+  });
+
+  it('a range block does not affect ips in a different /24', async () => {
+    origin = await startServer((req, res) => { res.writeHead(200); res.end('ok'); });
+
+    let { queue, denylist } = buildGates({
+      denylistConfig: { dailyThreshold: 1000, exceedThreshold: 1000, rangeThreshold: 3, rangeBlockMs: DAY_MS }
+    });
+    app = createApp({ cache: null, queue, denylist, upstreamUrl: origin.url, logger: fakeLogger });
+    appServer = await startServer(app);
+
+    for (let ip of ['192.0.2.1', '192.0.2.2', '192.0.2.3', '192.0.2.4']) {
+      await fetch(`${appServer.url}/file.pdf`, { headers: { 'x-test-ip': ip } });
+    }
+
+    let r = await fetch(`${appServer.url}/file.pdf`, { headers: { 'x-test-ip': '203.0.113.77' } });
+    assert.strictEqual(r.status, 429);
+    assert.ok((await r.text()).includes('concurrent'), 'an ip outside the blocked range should still be denied by the queue itself, not the range block');
   });
 });

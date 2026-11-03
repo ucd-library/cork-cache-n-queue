@@ -38,6 +38,8 @@ describe('config', () => {
     assert.strictEqual(config.queue.denylist.windowDays, 14);
     assert.strictEqual(config.queue.denylist.exceedThreshold, 5);
     assert.strictEqual(config.queue.denylist.blockDays, 30);
+    assert.strictEqual(config.queue.denylist.rangeIpThreshold, 25);
+    assert.strictEqual(config.queue.denylist.rangeBlockHours, 24);
     assert.strictEqual(config.cache.enabled, false);
     assert.strictEqual(config.cache.dir, './data/cache');
     assert.deepStrictEqual(config.cache.methods, ['GET', 'HEAD']);
@@ -55,6 +57,8 @@ describe('config', () => {
       CCNQ_QUEUE_METHODS: 'get, post',
       CCNQ_QUEUE_DENYLIST_ENABLED: 'false',
       CCNQ_QUEUE_DENYLIST_DAILY_THRESHOLD: '10',
+      CCNQ_QUEUE_DENYLIST_RANGE_IP_THRESHOLD: '50',
+      CCNQ_QUEUE_DENYLIST_RANGE_BLOCK_HOURS: '12',
       CCNQ_CACHE_KEY_INCLUDE_QUERY: 'false',
       CCNQ_CACHE_RESPECT_CACHE_CONTROL: 'false',
       CCNQ_CACHE_STRIP_SET_COOKIE: 'true',
@@ -66,6 +70,8 @@ describe('config', () => {
     assert.deepStrictEqual(config.queue.methods, ['GET', 'POST']);
     assert.strictEqual(config.queue.denylist.enabled, false);
     assert.strictEqual(config.queue.denylist.dailyThreshold, 10);
+    assert.strictEqual(config.queue.denylist.rangeIpThreshold, 50);
+    assert.strictEqual(config.queue.denylist.rangeBlockHours, 12);
     assert.strictEqual(config.cache.keyIncludeQuery, false);
     assert.strictEqual(config.cache.respectCacheControl, false);
     assert.strictEqual(config.cache.stripSetCookie, true);

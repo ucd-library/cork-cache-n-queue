@@ -22,7 +22,7 @@ async function resetQueueSchema(db, schema) {
  * @returns {Promise<void>}
  */
 async function resetDenylistSchema(db, schema) {
-  await db.query(`TRUNCATE ${schema}.ip_denial_count, ${schema}.ip_block`);
+  await db.query(`TRUNCATE ${schema}.ip_denial_count, ${schema}.ip_block, ${schema}.ip_group_block`);
 }
 
 export { resetQueueSchema, resetDenylistSchema };

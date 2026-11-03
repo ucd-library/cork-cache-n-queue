@@ -20,7 +20,9 @@ function notCalled(name) {
 function buildDenylist(store, overrides = {}) {
   return new Denylist({
     config: {
-      dailyThreshold: 25, windowDays: 14, exceedThreshold: 5, blockMs: 1000, clientIpHeader: '',
+      dailyThreshold: 25, windowDays: 14, exceedThreshold: 5, blockMs: 1000,
+      rangeThreshold: 25, rangeBlockMs: 1000, ipv4PrefixLength: 24, ipv6PrefixLength: 64,
+      clientIpHeader: '',
       ...overrides
     },
     store,

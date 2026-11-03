@@ -1,26 +1,30 @@
-import { getClientIp as resolveClientIp } from './ip-group.js';
+import { getClientIp as resolveClientIp, toGroupKey } from './ip-group.js';
 
 /**
  * @class Denylist
- * @description IP-level denial tracking and escalating blocking, reacting
+ * @description Two-tier denial tracking and escalating blocking, reacting
  * to 429s issued by the queue's concurrency admission gate. Tracks raw
- * per-ip (not CIDR-grouped) denial counts bucketed by UTC calendar day;
- * once an ip accumulates enough threshold-exceeded days within a trailing
- * window, it is blocked entirely for a configurable duration. Independent
- * of - and runs before - the cache and queue gates. State is coordinated
- * across service instances via Postgres (see ./denylist-store.js); any
- * Postgres error fails the gate open (never blocks a request due to an
- * internal error). Requests from a client ip on the configured allowlist
- * bypass this gate entirely, for consistency with the queue gate's own
- * allowlist bypass.
+ * per-ip denial counts bucketed by UTC calendar day; once an ip accumulates
+ * enough threshold-exceeded days within a trailing window, it is blocked
+ * entirely for a configurable duration. Independently, if more than
+ * rangeThreshold distinct ips out of the same CIDR-masked range (the same
+ * grouping concept the queue uses for concurrency, see ./ip-group.js) are
+ * denied on the same UTC day, the entire range is blocked for a flat
+ * rangeBlockMs (no escalation). Independent of - and runs before - the
+ * cache and queue gates. State is coordinated across service instances via
+ * Postgres (see ./denylist-store.js); any Postgres error fails the gate
+ * open (never blocks a request due to an internal error). Requests from a
+ * client ip on the configured allowlist bypass this gate entirely, for
+ * consistency with the queue gate's own allowlist bypass.
  */
 class Denylist {
 
   /**
    * @param {Object} opts
    * @param {Object} opts.config denylist settings: dailyThreshold,
-   * windowDays, exceedThreshold, blockMs, sweepIntervalMs,
-   * pruneRetentionMs, clientIpHeader
+   * windowDays, exceedThreshold, blockMs, rangeThreshold, rangeBlockMs,
+   * ipv4PrefixLength, ipv6PrefixLength, sweepIntervalMs, pruneRetentionMs,
+   * clientIpHeader
    * @param {DenylistStore} opts.store Postgres-backed denylist store
    * @param {Object} opts.allowlist {isAllowed(ip)}, see ./allowlist.js
    * @param {Object} opts.logger logger instance
@@ -44,6 +48,19 @@ class Denylist {
    */
   getClientIp(req) {
     return resolveClientIp(req, { trustedHeader: this.config.clientIpHeader });
+  }
+
+  /**
+   * @method getIpGroup
+   * @description mask a raw client ip to its CIDR range key, using the same
+   * prefix lengths the queue uses for concurrency grouping (so "range"
+   * means the same thing everywhere in the service).
+   *
+   * @param {String} ip raw client ip address
+   * @returns {String} CIDR-masked group key, e.g. "v4:198.51.100.0/24"
+   */
+  getIpGroup(ip) {
+    return toGroupKey(ip, { v4PrefixLength: this.config.ipv4PrefixLength, v6PrefixLength: this.config.ipv6PrefixLength });
   }
 
   /**
@@ -89,9 +106,9 @@ class Denylist {
 
   /**
    * @method isBlocked
-   * @description check whether ip is currently blocked. Allowlisted ips
-   * are never blocked. Fails open (treats as not blocked) on a Postgres
-   * error, consistent with the rest of the gateway's gates.
+   * @description check whether ip, or its range, is currently blocked.
+   * Allowlisted ips are never blocked. Fails open (treats as not blocked)
+   * on a Postgres error, consistent with the rest of the gateway's gates.
    *
    * @param {String} ip raw client ip address
    * @returns {Promise<Number|null>} seconds remaining until unblocked (min
@@ -100,7 +117,7 @@ class Denylist {
   async isBlocked(ip) {
     if (this.allowlist.isAllowed(ip)) return null;
     try {
-      let blockedUntil = await this.store.isBlocked(ip);
+      let blockedUntil = await this.store.isBlocked(ip, this.getIpGroup(ip));
       if (!blockedUntil) return null;
       let remainingMs = new Date(blockedUntil).getTime() - Date.now();
       return Math.max(Math.ceil(remainingMs / 1000), 1);
@@ -112,14 +129,14 @@ class Denylist {
 
   /**
    * @method recordDenial
-   * @description record one queue-issued 429 against ip. Intended to be
-   * called fire-and-forget (not awaited on the response path) immediately
-   * after Queue.admit() sends a 429. Never rejects - any Postgres error is
-   * logged and swallowed internally, so callers do not need their own
-   * .catch(). Allowlisted ips are skipped (belt-and-suspenders: the queue
-   * itself never 429s an allowlisted ip today, since Queue.isInScope()
-   * already bypasses it, but this keeps the two gates' allowlist behavior
-   * symmetric even if that ever changes).
+   * @description record one queue-issued 429 against ip (and its range).
+   * Intended to be called fire-and-forget (not awaited on the response
+   * path) immediately after Queue.admit() sends a 429. Never rejects - any
+   * Postgres error is logged and swallowed internally, so callers do not
+   * need their own .catch(). Allowlisted ips are skipped (belt-and-
+   * suspenders: the queue itself never 429s an allowlisted ip today, since
+   * Queue.isInScope() already bypasses it, but this keeps the two gates'
+   * allowlist behavior symmetric even if that ever changes).
    *
    * @param {String} ip raw client ip address
    * @returns {Promise<void>}
@@ -128,9 +145,21 @@ class Denylist {
     if (this.allowlist.isAllowed(ip)) return;
     try {
       let cfg = this.config;
-      let blocked = await this.store.recordDenial(ip, cfg.dailyThreshold, cfg.windowDays, cfg.exceedThreshold, cfg.blockMs);
-      if (blocked) {
+      let ipGroup = this.getIpGroup(ip);
+      let { ipBlocked, rangeBlocked } = await this.store.recordDenial(ip, {
+        ipGroup,
+        dailyThreshold: cfg.dailyThreshold,
+        windowDays: cfg.windowDays,
+        exceedThreshold: cfg.exceedThreshold,
+        blockMs: cfg.blockMs,
+        rangeThreshold: cfg.rangeThreshold,
+        rangeBlockMs: cfg.rangeBlockMs
+      });
+      if (ipBlocked) {
         this.logger.warn(`denylist: ip ${ip} blocked (or block extended) after reaching ${cfg.exceedThreshold} threshold-exceeded day(s) within a ${cfg.windowDays}d window`);
+      }
+      if (rangeBlocked) {
+        this.logger.warn(`denylist: range ${ipGroup} blocked (or block extended) after more than ${cfg.rangeThreshold} distinct ips were denied today`);
       }
     } catch (e) {
       this.logger.error('denylist: postgres error on recordDenial', e);

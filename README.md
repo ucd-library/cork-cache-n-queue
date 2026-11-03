@@ -3,7 +3,7 @@
 A lean pass-through reverse-proxy microservice for distributed-botnet mitigation, combining a few independent gates in front of an upstream origin:
 
 1. **Queue** - a Postgres-coordinated concurrency admission gate, capping how many in-scope requests from a single CIDR-masked client-IP group may be in flight at once, queueing a few more, and rejecting the rest with `429`.
-2. **Denylist** - escalating, per-ip blocking for ips that repeatedly collect the queue's `429`s - see [Queue internals](#queue-internals). Only takes effect when the queue is also enabled.
+2. **Denylist** - escalating, per-ip blocking for ips that repeatedly collect the queue's `429`s, plus a flat, range-wide block when too many distinct ips out of the same CIDR range are denied in one day - see [Queue internals](#queue-internals). Only takes effect when the queue is also enabled.
 3. **Cache** - a local, per-instance on-disk response cache. A cache hit is served immediately, bypassing the queue and the origin entirely.
 
 The queue and cache each have their own independent, configurable rule set (regex/includes/startsWith/endsWith + negation, matched against the request's URI path, headers, cookies, and query parameters) deciding which requests they apply to. Both are opt-in and off by default.
@@ -54,7 +54,7 @@ Every request runs through a single fixed pipeline:
 
 A **cache hit bypasses the queue and the origin entirely** - this is deliberate: cached content never needs to compete for a queue slot or round-trip to the origin, which is both the fastest path and the one that does the most to protect the origin from load. Only a cache miss (or a request the cache ruleset doesn't apply to) goes through the queue gate before being proxied.
 
-The **denylist gate runs first, ahead of the cache** - a currently-blocked ip is rejected before it can even check the cache, let alone compete for a queue slot. It has no ruleset of its own: it only ever rejects an ip that has already been blocked, and otherwise always falls through.
+The **denylist gate runs first, ahead of the cache** - a currently-blocked ip, or an ip whose range is currently blocked, is rejected before it can even check the cache, let alone compete for a queue slot. It has no ruleset of its own: it only ever rejects an ip that has already been blocked (directly or via its range), and otherwise always falls through.
 
 The two gates have different consistency models:
 
@@ -128,8 +128,10 @@ Escalating, per-ip blocking that reacts to the queue's own `429`s - see [Queue i
 | `CCNQ_QUEUE_DENYLIST_WINDOW_DAYS` | `14` | Trailing window (in UTC calendar days, inclusive of today) that threshold-exceeded days are counted within. |
 | `CCNQ_QUEUE_DENYLIST_EXCEED_THRESHOLD` | `5` | Number of threshold-exceeded days within the window that triggers a block. |
 | `CCNQ_QUEUE_DENYLIST_BLOCK_DAYS` | `30` | Block duration once triggered. A later trigger while already blocked only ever extends `blocked_until`, never shortens it. |
+| `CCNQ_QUEUE_DENYLIST_RANGE_IP_THRESHOLD` | `25` | Number of *distinct* raw ips out of the same CIDR range (`CCNQ_QUEUE_IPV4_PREFIX_LENGTH`/`CCNQ_QUEUE_IPV6_PREFIX_LENGTH`) that must each collect a `429` in one UTC calendar day before the whole range is blocked. |
+| `CCNQ_QUEUE_DENYLIST_RANGE_BLOCK_HOURS` | `24` | Range-level block duration once triggered. Flat - does not escalate with repeated trips like the per-ip block does - but still only ever extends `blocked_until`, never shortens it. |
 | `CCNQ_QUEUE_DENYLIST_SWEEP_INTERVAL_MS` | `60000` | Interval for the background sweep that prunes old denial-count rows and long-expired blocks. |
-| `CCNQ_QUEUE_DENYLIST_PRUNE_RETENTION_MS` | `2592000000` (30 days) | How long a denial-count row (past the window) or an expired block row is kept around before the sweep deletes it. |
+| `CCNQ_QUEUE_DENYLIST_PRUNE_RETENTION_MS` | `2592000000` (30 days) | How long a denial-count row (past the window) or an expired block row (ip- or range-level) is kept around before the sweep deletes it. |
 
 ### Cache
 
@@ -248,14 +250,20 @@ The queue's state lives in Postgres under a dedicated schema (default `queue`, s
 
 ### Denylist: escalating blocks for repeatedly-denied ips
 
-A third, independent gate (`src/lib/queue/denylist.js`), living alongside the queue since it only exists to react to the queue's own `429`s. Unlike the queue, it tracks raw individual client ips, not the CIDR-masked `ip_group`. Its state lives in the same Postgres schema (`sql/002-queue-denylist.sql`):
+A third, independent gate (`src/lib/queue/denylist.js`), living alongside the queue since it only exists to react to the queue's own `429`s. It has two independent tiers - per-ip and per-range - sharing the same Postgres schema (`sql/002-queue-denylist.sql`):
 
-- `ip_denial_count(ip, day, count)` - one row per ip per UTC calendar day, counting how many queue `429`s that ip collected that day.
-- `ip_block(ip PK, blocked_until)` - one row per currently-or-previously-blocked ip.
+- `ip_denial_count(ip, ip_group, day, count)` - one row per ip per UTC calendar day, counting how many queue `429`s that ip collected that day. `ip_group` is the same CIDR-masked key the queue uses for concurrency grouping (`CCNQ_QUEUE_IPV4_PREFIX_LENGTH`/`CCNQ_QUEUE_IPV6_PREFIX_LENGTH`), carried on each row so a range's distinct-denied-ip count for a day is just a count of its rows for that day.
+- `ip_block(ip PK, blocked_until)` - one row per currently-or-previously-blocked individual ip.
+- `ip_group_block(ip_group PK, blocked_until)` - one row per currently-or-previously-blocked range.
 
-Every time the queue actually sends a `429` (not when a client simply disconnects while queued, which also short-circuits the pipeline but sends no response at all), `gatewayHandler` (`src/controllers/gateway.js`) calls `Denylist.recordDenial(ip)`, which atomically increments that ip's counter for today (UTC) and counts how many days within the trailing `CCNQ_QUEUE_DENYLIST_WINDOW_DAYS` reached `CCNQ_QUEUE_DENYLIST_DAILY_THRESHOLD`. Once that count reaches `CCNQ_QUEUE_DENYLIST_EXCEED_THRESHOLD`, the ip is blocked for `CCNQ_QUEUE_DENYLIST_BLOCK_DAYS` - and if it's already blocked, a later trigger only ever extends `blocked_until`, never shortens it.
+Every time the queue actually sends a `429` (not when a client simply disconnects while queued, which also short-circuits the pipeline but sends no response at all), `gatewayHandler` (`src/controllers/gateway.js`) calls `Denylist.recordDenial(ip)`, which atomically:
 
-`Denylist.isBlocked(ip)` runs at the very top of `gatewayHandler`, **before** the cache or queue gates - a blocked ip gets an immediate `429` with `Retry-After` set to the remaining block duration (in seconds), without ever touching the cache or queue. Like the queue, this fails open on a Postgres error (never blocks a request due to an internal error) and is bypassed entirely by `CCNQ_QUEUE_ALLOWLIST`. `Denylist.startSweeping()`/`stopSweeping()` follow the same background-timer shape as the queue's, pruning old `ip_denial_count` rows and long-expired `ip_block` rows on `CCNQ_QUEUE_DENYLIST_SWEEP_INTERVAL_MS`.
+1. Increments that ip's counter for today (UTC) and counts how many days within the trailing `CCNQ_QUEUE_DENYLIST_WINDOW_DAYS` reached `CCNQ_QUEUE_DENYLIST_DAILY_THRESHOLD`. Once that count reaches `CCNQ_QUEUE_DENYLIST_EXCEED_THRESHOLD`, the ip is blocked for `CCNQ_QUEUE_DENYLIST_BLOCK_DAYS`.
+2. Counts how many *distinct* ips out of that ip's range were denied today; once that exceeds `CCNQ_QUEUE_DENYLIST_RANGE_IP_THRESHOLD`, the entire range is blocked for a flat `CCNQ_QUEUE_DENYLIST_RANGE_BLOCK_HOURS` (this tier never escalates, unlike the per-ip one).
+
+Either block - if already in effect - only ever has its `blocked_until` extended by a later trigger, never shortened.
+
+`Denylist.isBlocked(ip)` runs at the very top of `gatewayHandler`, **before** the cache or queue gates, and checks both tiers in a single query - a blocked ip *or* a blocked range gets an immediate `429` with `Retry-After` set to the remaining block duration (in seconds), without ever touching the cache or queue. This means an ip that has never been denied itself can still be blocked, if enough other ips in its range have been. Like the queue, this fails open on a Postgres error (never blocks a request due to an internal error) and is bypassed entirely by `CCNQ_QUEUE_ALLOWLIST`. `Denylist.startSweeping()`/`stopSweeping()` follow the same background-timer shape as the queue's, pruning old `ip_denial_count` rows and long-expired `ip_block`/`ip_group_block` rows on `CCNQ_QUEUE_DENYLIST_SWEEP_INTERVAL_MS`.
 
 ## Cache internals
 
@@ -290,8 +298,8 @@ Test tiers, by directory:
 |---|---|---|
 | `test/mocha/unit/` | No | Pure functions, no I/O: rule matcher, rule-file validation, cookie parsing, ip-group CIDR masking, allowlist parsing, cache-key derivation, `extractRequestFacts`, `proxy/headers.js`'s header-copying functions, `config.js`'s env-var parsing/defaults/validation, the `logger.js` wrapper, the gateway handler's outer error-catching (`createGatewayHandler`), and `server.js`'s `validateStartupConfig`. |
 | `test/mocha/cache/` | No | `DiskCache` end-to-end against a tmp directory (hit/miss, TTL expiry, `Cache-Control` handling, oversized-write abort, LRU eviction, thundering-herd dedup, bodyless-response handling), plus `CacheStore` and `MemoryIndex` tested directly in isolation. |
-| `test/mocha/queue-store/` | Yes | The plpgsql functions directly under real concurrency (`Promise.all` races); `Queue.admit()`'s state machine against fake req/res objects (admission caps, disconnect cleanup, a genuine `pendingTimeoutMs` timeout, the method pre-filter, stale-reconcile semantics); fail-open behavior against a fake store that rejects at each Postgres call site; the `Db` wrapper itself (schema substitution, param passing, pool lifecycle); and the denylist's own store (denial counting, exceedance-day/window logic, never-shortens block extension, pruning) plus its fail-open/allowlist-bypass behavior against a fake store. |
-| `test/mocha/e2e/` | Yes | The full app wired up with a real HTTP server and a stub origin: cache-bypasses-queue, a bodyless/non-cacheable response, concurrent-miss dedup through real HTTP, queue saturation (admit/queue/429), allowlist/ruleset bypass, the configurable client-IP header, the denylist gate (a queue 429 escalating into a block, the pre-check serving a 429 ahead of the queue, lifting a block, allowlist bypass), proxy correctness (body streaming, header stripping, multi-`Set-Cookie`, an unreachable origin's `502`, client-abort propagation), and the real `buildServer()`/`shutdown()` bootstrap wired against a live origin (and Postgres, when the queue is enabled). |
+| `test/mocha/queue-store/` | Yes | The plpgsql functions directly under real concurrency (`Promise.all` races); `Queue.admit()`'s state machine against fake req/res objects (admission caps, disconnect cleanup, a genuine `pendingTimeoutMs` timeout, the method pre-filter, stale-reconcile semantics); fail-open behavior against a fake store that rejects at each Postgres call site; the `Db` wrapper itself (schema substitution, param passing, pool lifecycle); and the denylist's own store (denial counting, exceedance-day/window logic, never-shortens block extension, pruning, plus the range tier's distinct-ip counting, group isolation, and never-shortens extension) plus its fail-open/allowlist-bypass behavior against a fake store. |
+| `test/mocha/e2e/` | Yes | The full app wired up with a real HTTP server and a stub origin: cache-bypasses-queue, a bodyless/non-cacheable response, concurrent-miss dedup through real HTTP, queue saturation (admit/queue/429), allowlist/ruleset bypass, the configurable client-IP header, the denylist gate (a queue 429 escalating into a block, the pre-check serving a 429 ahead of the queue, lifting a block, allowlist bypass, a range-wide block from enough distinct denied ips, and range isolation), proxy correctness (body streaming, header stripping, multi-`Set-Cookie`, an unreachable origin's `502`, client-abort propagation), and the real `buildServer()`/`shutdown()` bootstrap wired against a live origin (and Postgres, when the queue is enabled). |
 
 ## Project layout
 
@@ -322,5 +330,5 @@ test/mocha/                  unit / cache / queue-store / e2e test tiers, see Te
 - **A `429` with `Retry-After: 5`** means the queue gate rejected the request outright (its ip group's active slots and pending queue were both full). Tune `CCNQ_QUEUE_MAX_SERVED_PER_GROUP`/`CCNQ_QUEUE_MAX_PENDING_PER_GROUP` to change how aggressively this triggers, and `CCNQ_QUEUE_PENDING_TIMEOUT_MS` to change how long a queued request waits before timing out into the same response.
 - **Fail-open means a Postgres outage removes queue coverage, not origin availability** - if you see queue-related errors in the logs during a Postgres incident, expect traffic to pass straight through ungated rather than being blocked; this is intentional, not a bug.
 - **Inspecting live queue state**: connect to Postgres and query the configured schema directly, e.g. `SELECT * FROM queue.group_state;` / `SELECT * FROM queue.active_request;` / `SELECT * FROM queue.pending_request;` (substitute your `CCNQ_PG_SCHEMA` if not using the default `queue`).
-- **Inspecting/clearing denylist state**: `SELECT * FROM queue.ip_denial_count;` / `SELECT * FROM queue.ip_block;`. There's no admin endpoint - to manually unblock an ip ahead of its `blocked_until`, `UPDATE queue.ip_block SET blocked_until = NOW() WHERE ip = '...';` (or `DELETE` the row entirely).
+- **Inspecting/clearing denylist state**: `SELECT * FROM queue.ip_denial_count;` / `SELECT * FROM queue.ip_block;` / `SELECT * FROM queue.ip_group_block;`. There's no admin endpoint - to manually unblock an ip or a range ahead of its `blocked_until`, `UPDATE queue.ip_block SET blocked_until = NOW() WHERE ip = '...';` / `UPDATE queue.ip_group_block SET blocked_until = NOW() WHERE ip_group = '...';` (or `DELETE` the row entirely).
 - **The cache has no admin/purge endpoint** - since it's per-instance and ephemeral by design, the operational lever is restarting the instance (empties the cache) or reducing `CCNQ_CACHE_TTL_MS` for faster turnover.

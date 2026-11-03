@@ -75,6 +75,12 @@ const config = {
       windowDays: parseIntOr(env.CCNQ_QUEUE_DENYLIST_WINDOW_DAYS, 14),
       exceedThreshold: parseIntOr(env.CCNQ_QUEUE_DENYLIST_EXCEED_THRESHOLD, 5),
       blockDays: parseIntOr(env.CCNQ_QUEUE_DENYLIST_BLOCK_DAYS, 30),
+      // range-level block: more than this many distinct ips out of the same
+      // CIDR range (see queue.ipv4PrefixLength/ipv6PrefixLength) denied on
+      // the same UTC day blocks the whole range for a flat rangeBlockHours
+      // (no escalation, unlike the ip-level block above)
+      rangeIpThreshold: parseIntOr(env.CCNQ_QUEUE_DENYLIST_RANGE_IP_THRESHOLD, 25),
+      rangeBlockHours: parseIntOr(env.CCNQ_QUEUE_DENYLIST_RANGE_BLOCK_HOURS, 24),
       sweepIntervalMs: parseIntOr(env.CCNQ_QUEUE_DENYLIST_SWEEP_INTERVAL_MS, 60000),
       pruneRetentionMs: parseIntOr(env.CCNQ_QUEUE_DENYLIST_PRUNE_RETENTION_MS, 30 * 24 * 60 * 60 * 1000)
     }

@@ -89,6 +89,31 @@ describe('e2e: denylist gate', function () {
     assert.ok(retryAfter > 1000, `expected a multi-day Retry-After, got ${retryAfter}`);
 
     assert.strictEqual(hitCount, 0, 'the origin should never have been reached');
+
+    let countAfterR2 = await db.query(
+      `SELECT count FROM ${config.postgres.schema}.ip_denial_count WHERE ip = $1 AND day = (NOW() AT TIME ZONE 'UTC')::date`,
+      [headers['x-test-ip']]
+    );
+    assert.strictEqual(countAfterR2.rows[0].count, 2, 'r1 (queue 429) and r2 (pre-check 429) should both have counted');
+
+    let blockedUntilAfterR2 = (await db.query(
+      `SELECT blocked_until FROM ${config.postgres.schema}.ip_block WHERE ip = $1`, [headers['x-test-ip']]
+    )).rows[0].blocked_until;
+
+    let r3 = await fetch(`${appServer.url}/file.pdf`, { headers });
+    assert.strictEqual(r3.status, 429);
+    assert.ok((await r3.text()).includes('blocked'), 'third request should still be the denylist pre-check, not the queue');
+
+    let countAfterR3 = await db.query(
+      `SELECT count FROM ${config.postgres.schema}.ip_denial_count WHERE ip = $1 AND day = (NOW() AT TIME ZONE 'UTC')::date`,
+      [headers['x-test-ip']]
+    );
+    assert.strictEqual(countAfterR3.rows[0].count, 3, 'a pre-blocked ip that keeps retrying should keep accumulating denial-count history');
+
+    let blockedUntilAfterR3 = (await db.query(
+      `SELECT blocked_until FROM ${config.postgres.schema}.ip_block WHERE ip = $1`, [headers['x-test-ip']]
+    )).rows[0].blocked_until;
+    assert.strictEqual(blockedUntilAfterR3.getTime(), blockedUntilAfterR2.getTime(), 'repeated pre-blocked requests must never extend blocked_until - only recordDenial escalation may do that');
   });
 
   it('lifting the block (blocked_until in the past) falls back through to the queue\'s own decision', async () => {
@@ -161,6 +186,13 @@ describe('e2e: denylist gate', function () {
     assert.ok((await r.text()).includes('blocked'), 'a never-before-seen ip in a blocked range should be rejected by the pre-check');
 
     assert.strictEqual(hitCount, 0, 'the origin should never have been reached');
+
+    let countResp = await db.query(
+      `SELECT count FROM ${config.postgres.schema}.ip_denial_count WHERE ip = $1 AND day = (NOW() AT TIME ZONE 'UTC')::date`,
+      [freshIp]
+    );
+    assert.strictEqual(countResp.rows.length, 1, 'a request rejected purely by the range pre-check must still create an ip_denial_count row for that ip');
+    assert.strictEqual(countResp.rows[0].count, 1);
   });
 
   it('a range block does not affect ips in a different /24', async () => {

@@ -73,6 +73,42 @@ describe('DenylistStore (Postgres)', function () {
     assert.strictEqual(resp.rows[0].count, 3);
   });
 
+  it('incrementDenialCount creates a new row with count=1 for a never-before-seen ip', async () => {
+    let testIp = ip();
+    let testGroup = group();
+
+    await store.incrementDenialCount(testIp, testGroup);
+
+    let resp = await db.query(
+      `SELECT count, ip_group FROM ${config.postgres.schema}.ip_denial_count WHERE ip = $1 AND day = (NOW() AT TIME ZONE 'UTC')::date`,
+      [testIp]
+    );
+    assert.strictEqual(resp.rows.length, 1);
+    assert.strictEqual(resp.rows[0].count, 1);
+    assert.strictEqual(resp.rows[0].ip_group, testGroup);
+  });
+
+  it('incrementDenialCount accumulates across repeated calls without ever touching ip_block or ip_group_block', async () => {
+    let testIp = ip();
+    let testGroup = group();
+
+    await store.incrementDenialCount(testIp, testGroup);
+    await store.incrementDenialCount(testIp, testGroup);
+    await store.incrementDenialCount(testIp, testGroup);
+
+    let countResp = await db.query(
+      `SELECT count FROM ${config.postgres.schema}.ip_denial_count WHERE ip = $1 AND day = (NOW() AT TIME ZONE 'UTC')::date`,
+      [testIp]
+    );
+    assert.strictEqual(countResp.rows[0].count, 3);
+
+    let blockResp = await db.query(`SELECT * FROM ${config.postgres.schema}.ip_block WHERE ip = $1`, [testIp]);
+    assert.strictEqual(blockResp.rows.length, 0, 'incrementDenialCount must never create an ip_block row, no matter how high the count climbs');
+
+    let groupBlockResp = await db.query(`SELECT * FROM ${config.postgres.schema}.ip_group_block WHERE ip_group = $1`, [testGroup]);
+    assert.strictEqual(groupBlockResp.rows.length, 0, 'incrementDenialCount must never create an ip_group_block row');
+  });
+
   it('returns ipBlocked=false until enough threshold-exceeded days accumulate within the window, then true', async () => {
     let testIp = ip();
     let opts = denialOpts({ dailyThreshold: 25, windowDays: 14, exceedThreshold: 5, blockMs: DAY_MS });

@@ -1,9 +1,10 @@
 /**
  * @class DenylistStore
  * @description Postgres access layer for per-ip denial tracking and
- * escalating blocks, reacting to 429s issued by the queue's concurrency
- * gate (see ../queue/index.js). Every method is a single round trip; see
- * sql/002-queue-denylist.sql for the underlying tables/functions.
+ * escalating blocks, reacting to 429s issued either by the queue's
+ * concurrency gate (see ../queue/index.js) or by the denylist's own
+ * pre-check (see incrementDenialCount). Every method is a single round
+ * trip; see sql/002-queue-denylist.sql for the underlying tables/functions.
  */
 class DenylistStore {
 
@@ -52,6 +53,33 @@ class DenylistStore {
     );
     let row = resp.rows[0];
     return { ipBlocked: row.ip_blocked, rangeBlocked: row.range_blocked };
+  }
+
+  /**
+   * @method incrementDenialCount
+   * @description record one denial for ip (a member of ipGroup) against
+   * today's (UTC) counter only - the same ip_denial_count upsert
+   * record_ip_denial performs as its first step, but with none of that
+   * function's window-evaluation or ip_block/ip_group_block escalation.
+   * Intended for a request that Denylist.isBlocked() already rejected
+   * before it ever reached the queue - see Denylist.recordBlockedRequest
+   * for why escalation must be skipped on that path. A plain inline upsert
+   * (not a stored function), for the same reason isBlocked() isn't one: a
+   * single-statement write, no multi-step logic worth encapsulating
+   * server-side.
+   *
+   * @param {String} ip raw client ip address
+   * @param {String} ipGroup CIDR-masked group key for ip, see
+   * ./ip-group.js's toGroupKey
+   * @returns {Promise<void>}
+   */
+  async incrementDenialCount(ip, ipGroup) {
+    await this.db.query(
+      `INSERT INTO ${this.schema}.ip_denial_count (ip, ip_group, day, count)
+       VALUES ($1, $2, (NOW() AT TIME ZONE 'UTC')::date, 1)
+       ON CONFLICT (ip, day) DO UPDATE SET count = ip_denial_count.count + 1, ip_group = EXCLUDED.ip_group`,
+      [ip, ipGroup]
+    );
   }
 
   /**

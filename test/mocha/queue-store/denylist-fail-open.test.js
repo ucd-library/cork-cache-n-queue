@@ -69,11 +69,20 @@ describe('Denylist fail-open behavior (fake store, no Postgres)', () => {
     assert.strictEqual(await denylist.isBlocked('203.0.113.1'), null);
   });
 
-  it('an allowlisted ip never touches the store, for isBlocked or recordDenial', async () => {
-    let store = { isBlocked: notCalled('isBlocked'), recordDenial: notCalled('recordDenial') };
+  it('recordBlockedRequest never rejects and logs when the store rejects', async () => {
+    let store = { isBlocked: notCalled('isBlocked'), recordDenial: notCalled('recordDenial'), incrementDenialCount: async () => { throw new Error('connection refused'); } };
+    let denylist = buildDenylist(store);
+
+    await assert.doesNotReject(denylist.recordBlockedRequest('203.0.113.1'));
+    assert.strictEqual(loggedErrors.length, 1);
+  });
+
+  it('an allowlisted ip never touches the store, for isBlocked, recordDenial, or recordBlockedRequest', async () => {
+    let store = { isBlocked: notCalled('isBlocked'), recordDenial: notCalled('recordDenial'), incrementDenialCount: notCalled('incrementDenialCount') };
     let denylist = buildDenylist(store, { allowlistEntries: '203.0.113.1' });
 
     assert.strictEqual(await denylist.isBlocked('203.0.113.1'), null);
     await assert.doesNotReject(denylist.recordDenial('203.0.113.1'));
+    await assert.doesNotReject(denylist.recordBlockedRequest('203.0.113.1'));
   });
 });

@@ -5,10 +5,11 @@ import { proxyRequest } from '../lib/proxy/index.js';
  * @function createGatewayHandler
  * @description build the single catch-all request handler implementing the
  * full gate order: denylist block-check (an ip currently blocked gets an
- * immediate 429, before cache or queue even run) -> cache check (a hit
- * bypasses the queue and origin entirely) -> queue admission gate (a
- * queue-issued 429 is recorded against the client ip for denylist tracking)
- * -> proxy to the upstream origin -> cache write (if eligible). Every
+ * immediate 429, before cache or queue even run, and that denial is counted
+ * too) -> cache check (a hit bypasses the queue and origin entirely) ->
+ * queue admission gate (its own 429s are recorded against the client ip
+ * too, the same as the pre-check's) -> proxy to the upstream origin ->
+ * cache write (if eligible). Every
  * response carries an `X-Cache` header of `HIT`, `MISS`, or `BYPASS` (not in
  * the cache's configured scope at all) so callers can tell which path served
  * the response.
@@ -31,6 +32,13 @@ function createGatewayHandler(opts) {
         let retryAfterSeconds = await denylist.isBlocked(ip);
         if (retryAfterSeconds !== null) {
           res.status(429).set('Retry-After', String(retryAfterSeconds)).send('Too many prior violations, temporarily blocked');
+          // this request never reaches the queue, so without this call its
+          // denial would never be counted at all - recordBlockedRequest()
+          // only increments ip's raw per-day counter (no escalation, no
+          // ip_block/ip_group_block writes), so it can't self-extend an
+          // active block the way recordDenial() could if reused here.
+          // Never rejects, so it's safe to fire-and-forget.
+          denylist.recordBlockedRequest(ip);
           return;
         }
       }

@@ -3,8 +3,12 @@ import { getClientIp as resolveClientIp, toGroupKey } from './ip-group.js';
 /**
  * @class Denylist
  * @description Two-tier denial tracking and escalating blocking, reacting
- * to 429s issued by the queue's concurrency admission gate. Tracks raw
- * per-ip denial counts bucketed by UTC calendar day; once an ip accumulates
+ * to 429s issued by the queue's concurrency admission gate. Also counts -
+ * without re-evaluating escalation - requests that this gate's own
+ * pre-check (isBlocked) rejects, via recordBlockedRequest, so an ip's (or
+ * its range's) denial history stays accurate for the next real escalation
+ * decision even while already blocked. Tracks raw per-ip denial counts
+ * bucketed by UTC calendar day; once an ip accumulates
  * enough threshold-exceeded days within a trailing window, it is blocked
  * entirely for a configurable duration. Independently, if more than
  * rangeThreshold distinct ips out of the same CIDR-masked range (the same
@@ -163,6 +167,41 @@ class Denylist {
       }
     } catch (e) {
       this.logger.error('denylist: postgres error on recordDenial', e);
+    }
+  }
+
+  /**
+   * @method recordBlockedRequest
+   * @description record one denial against ip's raw per-day counter only,
+   * for a request that isBlocked() itself rejected (ip, or its range, was
+   * already blocked before the request ever reached the queue). Narrower
+   * than recordDenial() on purpose: it never evaluates or re-upserts
+   * ip_block/ip_group_block escalation, only
+   * DenylistStore.incrementDenialCount()'s raw counter write. This keeps an
+   * already-blocked ip's own window history accurate - so the next real
+   * escalation decision (whenever recordDenial() next runs for it) sees the
+   * full picture - without the risk recordDenial() would carry here: a
+   * continually-retried, already-blocked ip would keep re-satisfying its
+   * own exceedThreshold check on essentially every request, and
+   * GREATEST(existing blocked_until, now + blockMs) would then almost
+   * always pick the new, later value - turning a fixed-duration block into
+   * a de facto indefinite one for as long as the client keeps retrying.
+   * Intended to be called fire-and-forget (not awaited on the response
+   * path), immediately after isBlocked() returns non-null. Never rejects -
+   * any Postgres error is logged and swallowed internally, so callers do
+   * not need their own .catch(). Allowlisted ips are skipped (isBlocked()
+   * never returns non-null for one, so this is belt-and-suspenders only,
+   * matching recordDenial()'s own rationale for the same check).
+   *
+   * @param {String} ip raw client ip address
+   * @returns {Promise<void>}
+   */
+  async recordBlockedRequest(ip) {
+    if (this.allowlist.isAllowed(ip)) return;
+    try {
+      await this.store.incrementDenialCount(ip, this.getIpGroup(ip));
+    } catch (e) {
+      this.logger.error('denylist: postgres error on recordBlockedRequest', e);
     }
   }
 }
